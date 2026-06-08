@@ -242,7 +242,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# /nominate-builder  - used in a group, as a reply to the target user
+# /onboard  - used in a group, as a reply to the target user
 # ---------------------------------------------------------------------------
 
 async def cmd_nominate(update: Update, context: ContextTypes.DEFAULT_TYPE):
