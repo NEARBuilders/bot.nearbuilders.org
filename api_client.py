@@ -8,7 +8,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-API_URL = os.getenv("NEARBUILDERS_API_URL", "https://nearbuilders.org/api/proposals")
+API_URL = os.getenv("NEAR_ONBOARDING_URL", "https://nearbuilders.org/api/proposals")
 API_KEY = os.getenv("NEARBUILDERS_API_KEY", "")
 
 
