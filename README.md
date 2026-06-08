@@ -1,6 +1,6 @@
 # NEAR Builders Telegram Bot
 
-A Telegram bot for nominating and onboarding builders to the [NEAR](https://near.org) ecosystem. Admins (or any group member) can nominate someone directly from a group chat, the bot contacts them via DM to walk through a profile setup, and on completion submits their profile to the NEAR Builders API for review.
+A Telegram bot for nominating and onboarding builders to the [NEAR](https://near.org) ecosystem. Any group member can nominate someone directly from a group chat, the bot contacts them via DM to walk through a profile setup, and on completion submits their profile to the NEAR Builders API for review.
 
 ---
 
@@ -10,15 +10,21 @@ A Telegram bot for nominating and onboarding builders to the [NEAR](https://near
   - By username: `/onboard @username` (anywhere in the chat)
   - By reply: send `/onboard` as a reply to the target user's message
 - Nominated users are messaged directly to complete their profile
-- Username lookup uses a three-tier approach: DB (most reliable) → Telegram API → username-only fallback
+- Username lookup uses a three-tier approach: DB (most reliable) > Telegram API > username-only fallback
 - Pending nominations stored by username - if a user can't be resolved immediately, the nomination is saved and claimed automatically when they start the bot
 - If the user hasn't started the bot yet, a group message is posted with a **💬 Start Chat** button
+- Emoji reactions on the `/onboard` command message - no group message flooding:
+  - 🎉 - user has already completed their onboarding
+  - 👀 - user has been nominated and is in progress
 - Full DM onboarding flow with a dedicated question per field
+- NEAR address is mandatory with format validation (`.near`, `.tg`, or 64-character hex)
+- **☄️ Create NEAR Wallet** button linking to Meteor Wallet for users without an address
 - Skills selection via interactive toggle buttons (tap to add/remove)
-- Links builder via guided Add Link flow (label > URL > repeat as needed)
+- Links builder via guided Add Link flow (label > URL, repeatable)
 - Summary review at the end with per-field edit buttons in a 2-column grid and a full-width Confirm & Submit button
+- Users who have already submitted cannot restart the onboarding flow
 - Submits to the NEAR Builders API on confirmation
-- PostgreSQL logging of nominated users and nomination events
+- PostgreSQL logging of nominated users, nomination events, and pending nominations
 - Rotating log file at `logs/bot.log`
 
 ---
@@ -27,21 +33,36 @@ A Telegram bot for nominating and onboarding builders to the [NEAR](https://near
 
 ```
 /onboard @username  (or as a reply to a message)
-  └─> If user ID known: DM sent immediately
-  └─> If user ID unknown: nomination saved, Start Chat button posted in group
-        └─> User clicks Start Chat → /start
+  │
+  ├─> Already completed > 🎉 reaction on command message
+  ├─> Nominated, in progress > 👀 reaction on command message
+  │
+  ├─> If user ID known: DM sent immediately
+  └─> If user ID unknown: nomination saved, 💬 Start Chat button posted in group
+        └─> User clicks Start Chat > /start
               └─> Pending nomination claimed automatically
-                    ├─> NEAR Address (optional)
+                    ├─> NEAR Address (mandatory, validated)
                     ├─> Name (optional)
                     ├─> Bio (optional, max 1000 chars - trimmed if exceeded)
                     ├─> Skills (toggle button selection)
                     ├─> Location (optional)
                     ├─> Links (guided Add Link flow)
                     └─> Summary with edit buttons
-                          └─> Confirm & Submit → POST to NEAR Builders API
+                          └─> Confirm & Submit > POST to NEAR Builders API
 ```
 
-All fields are optional. Users can skip any step using the ⏭️ Skip button.
+All fields except NEAR Address are optional. Users can skip optional steps using the ⏭️ Skip button.
+
+---
+
+## /start Behaviour
+
+| Scenario | Response |
+|---|---|
+| Not nominated | "You will need to be nominated to enter the bot!" |
+| Already completed | "You've already submitted your builder profile!" |
+| Nominated, not yet started | Welcome message + onboarding begins |
+| Nominated, mid-onboarding | Restarts onboarding from the beginning |
 
 ---
 
@@ -90,10 +111,11 @@ cp .env.example .env
 Edit `.env` with your values:
 
 ```env
-TELEGRAM_BOT_TOKEN=your_bot_token_here #BOT TOKEN FROM BOTFATHER
-DATABASE_URL=postgresql://user:password@localhost:5432/nearbuilders #POSTGRES LOCAL INSTALL
-NEARBUILDERS_API_URL=https://nearbuilders.org/api/proposals #POST
-NEARBUILDERS_API_KEY=your_api_key_here #API KEY FROM NEARBUILDERS WEB UI DASHBOARD
+TELEGRAM_BOT_TOKEN=your_bot_token_here       # Bot token from BotFather
+DATABASE_URL=postgresql://user:password@localhost:5432/nearbuilders  # Postgres connection
+NEARBUILDERS_API_URL=https://nearbuilders.org/api/proposals          # POST endpoint
+NEARBUILDERS_API_KEY=your_api_key_here       # API key from NEAR Builders dashboard
+NEAR_WALLET_URL=https://wallet.meteorwallet.app  # Wallet creation link shown to users
 
 # Optional: override the default allowed skills list (comma-separated)
 # ALLOWED_SKILLS=Frontend,Backend,Rust,Typescript,DeFi
@@ -103,13 +125,13 @@ NEARBUILDERS_API_KEY=your_api_key_here #API KEY FROM NEARBUILDERS WEB UI DASHBOA
 
 In [@BotFather](https://t.me/BotFather):
 
-Go to **Bot Settings > Group Privacy > Turn Off** so the bot can read messages in groups without being @mentioned
+Go to **Bot Settings > Group Privacy > Turn Off** so the bot can read messages in groups without being @mentioned.
 
 The bot command menu is intentionally left empty to prevent the `/` button from auto-firing the command before a username is entered.
 
 ### 6. Update the bot username
 
-In `bot.py`, update this line to match your bot's actual username - this is required for onboarding as an auto message if the user has not interacted with the bot before:
+In `bot.py`, update this line to match your bot's actual username - required for the Start Chat button sent to unregistered users:
 
 ```python
 BOT_USERNAME = "@nearbuildersbot"
@@ -161,13 +183,15 @@ bot.nearbuilders.org/
 | `first_name` | TEXT | Telegram first name |
 | `started_at` | TIMESTAMPTZ | When they were first registered |
 | `updated_at` | TIMESTAMPTZ | Last updated |
+| `completed_at` | TIMESTAMPTZ | When they submitted their profile (null if not yet submitted) |
 
 **`nomination_log`** - every `/onboard` event
 
 | Column | Type | Description |
 |---|---|---|
 | `id` | SERIAL | Primary key |
-| `nominated_user_id` | BIGINT | Who was nominated |
+| `nominated_user_id` | BIGINT | Who was nominated (null if unknown at nomination time) |
+| `nominated_username` | TEXT | @username of the nominated user |
 | `nominated_by_user_id` | BIGINT | Who nominated them |
 | `group_chat_id` | BIGINT | Which group the command was used in |
 | `created_at` | TIMESTAMPTZ | When it happened |
@@ -221,7 +245,7 @@ On confirmation, the bot POSTs to `https://nearbuilders.org/api/proposals` with 
 ```
 
 - `entityId` uses the NEAR address if provided, otherwise falls back to `telegram:<user_id>`
-- All payload fields are optional
+- All payload fields except `entityId` are optional
 - `nominatedBy` and `telegramChatId` are sourced from the nomination log in the database
 
 ---
