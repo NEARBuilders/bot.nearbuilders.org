@@ -113,7 +113,7 @@ Edit `.env` with your values:
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token_here       # Bot token from BotFather
 DATABASE_URL=postgresql://user:password@localhost:5432/nearbuilders  # Postgres connection
-NEARBUILDERS_API_URL=https://nearbuilders.org/api/proposals          # POST endpoint
+NEAR_ONBOARDING_URL=https://nearbuilders.org/api/proposals          # POST endpoint
 NEARBUILDERS_API_KEY=your_api_key_here       # API key from NEAR Builders dashboard
 NEAR_WALLET_URL=https://wallet.meteorwallet.app  # Wallet creation link shown to users
 
