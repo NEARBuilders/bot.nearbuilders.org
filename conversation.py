@@ -19,7 +19,10 @@ MAX_SKILLS = 20
 STEP_QUESTIONS = {
     "near_address": (
         "🔗 What is your NEAR address?\n\n"
-        "e.g. <code>yourname.near</code>"
+        "Accepted formats:\n"
+        "  • <code>yourname.near</code>\n"
+        "  • <code>yourname.tg</code>\n"
+        "  • 64-character hex address"
     ),
     "name":     "👤 What's your name?",
     "bio":      f"📝 Describe yourself in a short bio:\n\nMax {BIO_MAX_CHARS} characters - anything longer will be trimmed.",
@@ -172,7 +175,23 @@ def apply_answer(state: ConversationState, text: str) -> str | None:
     step = state.editing_field or state.current_step
 
     if step == "near_address":
-        state.data["near_address"] = text.strip() if text.strip() else None
+        addr = text.strip()
+        if not addr:
+            return "⚠️ NEAR address is required. Please enter your address or create a wallet."
+        # Validate: must end in .near, .tg, or be a 64-char hex string
+        import re
+        if addr.endswith(".near") or addr.endswith(".tg"):
+            state.data["near_address"] = addr
+        elif re.fullmatch(r"[0-9a-fA-F]{64}", addr):
+            state.data["near_address"] = addr
+        else:
+            return (
+                "⚠️ That doesn't look like a valid NEAR address.\n\n"
+                "Accepted formats:\n"
+                "  • <code>yourname.near</code>\n"
+                "  • <code>yourname.tg</code>\n"
+                "  • 64-character hex address"
+            )
 
     elif step == "name":
         if len(text) > NAME_MAX_CHARS:
