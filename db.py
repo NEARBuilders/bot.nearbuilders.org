@@ -21,7 +21,8 @@ def setup_db():
                     username       TEXT,
                     first_name     TEXT,
                     started_at     TIMESTAMPTZ DEFAULT NOW(),
-                    updated_at     TIMESTAMPTZ DEFAULT NOW()
+                    updated_at     TIMESTAMPTZ DEFAULT NOW(),
+                    completed_at   TIMESTAMPTZ DEFAULT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS nomination_log (
@@ -39,6 +40,12 @@ def setup_db():
                     group_chat_id        BIGINT NOT NULL,
                     created_at           TIMESTAMPTZ DEFAULT NOW()
                 );
+            """)
+
+            # Migrate existing bot_users if completed_at column is missing
+            cur.execute("""
+                ALTER TABLE bot_users
+                ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ DEFAULT NULL;
             """)
 
             # Migrate existing nomination_log if nominated_username column is missing
@@ -152,6 +159,29 @@ def claim_pending_nomination(user_id: int, username: str) -> dict | None:
             )
         conn.commit()
     return nomination
+
+
+def mark_completed(user_id: int):
+    """Mark a user as having completed and submitted their profile."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE bot_users SET completed_at = NOW(), updated_at = NOW()
+                WHERE user_id = %s
+            """, (user_id,))
+        conn.commit()
+
+
+def has_completed(user_id: int) -> bool:
+    """Check if a user has already submitted their profile."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT completed_at FROM bot_users WHERE user_id = %s",
+                (user_id,)
+            )
+            row = cur.fetchone()
+            return bool(row and row["completed_at"])
 
 
 def get_user_by_username(username: str) -> dict | None:
