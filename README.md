@@ -244,7 +244,7 @@ On confirmation, the bot POSTs to `https://nearbuilders.org/api/proposals` with 
 }
 ```
 
-- `entityId` uses the NEAR address if provided, otherwise falls back to `telegram:<user_id>`
+- `entityId` uses the NEAR address.
 - All payload fields except `entityId` are optional
 - `nominatedBy` and `telegramChatId` are sourced from the nomination log in the database
 
