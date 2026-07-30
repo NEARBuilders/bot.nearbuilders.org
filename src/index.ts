@@ -29,6 +29,9 @@ async function main(): Promise<void> {
   if (!config.telegramBotToken) {
     throw new Error("TELEGRAM_BOT_TOKEN is not set in .env");
   }
+  if (!config.nearBuildersApiKey) {
+    throw new Error("NEARBUILDERS_API_KEY is not set in .env");
+  }
 
   await db.setupDb();
   logger.info("Database tables ready");

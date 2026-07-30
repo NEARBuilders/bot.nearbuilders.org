@@ -13,12 +13,18 @@ export interface BotUser {
 }
 
 export interface Nomination {
+  id: number;
+  nominated_user_id: number;
   nominated_by_user_id: number;
   group_chat_id: number;
+  confirmed_at: Date | null;
+  website_nomination_id: string | null;
 }
 
-export interface PendingNomination extends Nomination {
+export interface PendingNomination {
   username: string;
+  nominated_by_user_id: number;
+  group_chat_id: number;
   created_at: Date;
 }
 
@@ -40,7 +46,8 @@ export async function setupDb(): Promise<void> {
       first_name     TEXT,
       started_at     TIMESTAMPTZ DEFAULT NOW(),
       updated_at     TIMESTAMPTZ DEFAULT NOW(),
-      completed_at   TIMESTAMPTZ DEFAULT NULL
+      completed_at   TIMESTAMPTZ DEFAULT NULL,
+      confirmed_at   TIMESTAMPTZ DEFAULT NULL
     );
 
     CREATE TABLE IF NOT EXISTS nomination_log (
@@ -49,7 +56,9 @@ export async function setupDb(): Promise<void> {
       nominated_username   TEXT,
       nominated_by_user_id BIGINT NOT NULL,
       group_chat_id        BIGINT NOT NULL,
-      created_at           TIMESTAMPTZ DEFAULT NOW()
+      created_at           TIMESTAMPTZ DEFAULT NOW(),
+      confirmed_at         TIMESTAMPTZ DEFAULT NULL,
+      website_nomination_id TEXT DEFAULT NULL
     );
 
     CREATE TABLE IF NOT EXISTS pending_nominations (
@@ -62,11 +71,27 @@ export async function setupDb(): Promise<void> {
     ALTER TABLE bot_users
       ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ DEFAULT NULL;
 
+    ALTER TABLE bot_users
+      ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ DEFAULT NULL;
+
     ALTER TABLE nomination_log
       ADD COLUMN IF NOT EXISTS nominated_username TEXT;
 
     ALTER TABLE nomination_log
+      ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ DEFAULT NULL;
+
+    ALTER TABLE nomination_log
+      ADD COLUMN IF NOT EXISTS website_nomination_id TEXT DEFAULT NULL;
+
+    ALTER TABLE nomination_log
+      DROP COLUMN IF EXISTS handoff_expires_at;
+
+    ALTER TABLE nomination_log
       ALTER COLUMN nominated_user_id DROP NOT NULL;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS nomination_log_website_nomination_id_idx
+      ON nomination_log (website_nomination_id)
+      WHERE website_nomination_id IS NOT NULL;
   `);
 }
 
@@ -204,6 +229,20 @@ export async function hasCompleted(userId: number): Promise<boolean> {
   return result.rows[0]?.completed_at != null;
 }
 
+export async function hasConfirmed(userId: number): Promise<boolean> {
+  const result = await getPool().query<{
+    confirmed_at: Date | null;
+    completed_at: Date | null;
+  }>(
+    `SELECT confirmed_at, completed_at
+     FROM bot_users
+     WHERE user_id = $1`,
+    [userId],
+  );
+  const user = result.rows[0];
+  return user?.confirmed_at != null || user?.completed_at != null;
+}
+
 export async function getUserByUsername(
   username: string,
 ): Promise<BotUser | null> {
@@ -220,7 +259,12 @@ export async function getNomination(
   nominatedUserId: number,
 ): Promise<Nomination | null> {
   const result = await getPool().query<Nomination>(
-    `SELECT nominated_by_user_id, group_chat_id
+    `SELECT id,
+            nominated_user_id,
+            nominated_by_user_id,
+            group_chat_id,
+            confirmed_at,
+            website_nomination_id
      FROM nomination_log
      WHERE nominated_user_id = $1
      ORDER BY created_at DESC
@@ -228,6 +272,46 @@ export async function getNomination(
     [nominatedUserId],
   );
   return result.rows[0] ?? null;
+}
+
+export async function confirmNomination(input: {
+  nominationId: number;
+  nominatedUserId: number;
+  websiteNominationId: string;
+}): Promise<void> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `UPDATE nomination_log
+       SET confirmed_at = COALESCE(confirmed_at, NOW()),
+           website_nomination_id = $3
+       WHERE id = $1 AND nominated_user_id = $2`,
+      [
+        input.nominationId,
+        input.nominatedUserId,
+        input.websiteNominationId,
+      ],
+    );
+    if (result.rowCount !== 1) {
+      throw new Error("Nomination was not found for this Telegram user");
+    }
+    const userResult = await client.query(
+      `UPDATE bot_users
+       SET confirmed_at = COALESCE(confirmed_at, NOW()), updated_at = NOW()
+       WHERE user_id = $1`,
+      [input.nominatedUserId],
+    );
+    if (userResult.rowCount !== 1) {
+      throw new Error("Telegram user was not registered");
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function closeDb(): Promise<void> {

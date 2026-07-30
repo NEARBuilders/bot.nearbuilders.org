@@ -1,29 +1,14 @@
 import { Markup, Telegraf, type Context } from "telegraf";
 import { message } from "telegraf/filters";
 import type { User } from "telegraf/types";
-import { submitBuilder as submitBuilderDefault } from "./api-client.js";
-import { ALLOWED_SKILLS, config } from "./config.js";
-import {
-  STEP_LABELS,
-  STEP_QUESTIONS,
-  STEPS,
-  addLink,
-  applyAnswer,
-  buildApiPayload,
-  buildLinksOverview,
-  buildSummary,
-  clearSession,
-  escapeHtml,
-  getSelectedSkills,
-  getSession,
-  nextStep,
-  skipCurrentStep,
-  startSession,
-  toggleSkill,
-  type Step,
-} from "./conversation.js";
+import { acknowledgeCallbackQuery } from "./callback-query.js";
+import { config } from "./config.js";
 import * as defaultDb from "./db.js";
 import { logger } from "./logger.js";
+import {
+  createNomination as createNominationDefault,
+  type NominationHandoff,
+} from "./nomination-api.js";
 
 type HandlerDatabase = Pick<
   typeof defaultDb,
@@ -31,21 +16,22 @@ type HandlerDatabase = Pick<
   | "claimPendingNomination"
   | "registerUser"
   | "hasCompleted"
+  | "hasConfirmed"
   | "getUserByUsername"
   | "addPendingNomination"
   | "logNomination"
   | "getNomination"
-  | "markCompleted"
+  | "confirmNomination"
 >;
 
 export interface BotDependencies {
   db: HandlerDatabase;
-  submitBuilder: typeof submitBuilderDefault;
+  createNomination: typeof createNominationDefault;
 }
 
 const productionDependencies: BotDependencies = {
   db: defaultDb,
-  submitBuilder: submitBuilderDefault,
+  createNomination: createNominationDefault,
 };
 
 interface NominationTarget {
@@ -63,99 +49,49 @@ function isGroup(ctx: Context): boolean {
   return ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 function mentionUser(user: Pick<User, "id" | "first_name">): string {
   return `<a href="tg://user?id=${user.id}">${escapeHtml(user.first_name)}</a>`;
 }
 
+function mentionUserId(userId: number, label: string): string {
+  return `<a href="tg://user?id=${userId}">${escapeHtml(label)}</a>`;
+}
+
 function mentionTarget(target: NominationTarget): string {
   if (target.id !== null) {
-    return `<a href="tg://user?id=${target.id}">${escapeHtml(target.firstName)}</a>`;
+    return mentionUserId(target.id, target.firstName);
   }
   return `@${escapeHtml(target.username ?? target.firstName)}`;
-}
-
-function buildEditKeyboard() {
-  const rows: ReturnType<typeof Markup.button.callback>[][] = [];
-  for (let index = 0; index < STEPS.length; index += 2) {
-    const first = STEPS[index];
-    if (!first) continue;
-    const row = [
-      Markup.button.callback(`✏️ ${STEP_LABELS[first]}`, `edit:${first}`),
-    ];
-    const second = STEPS[index + 1];
-    if (second) {
-      row.push(
-        Markup.button.callback(`✏️ ${STEP_LABELS[second]}`, `edit:${second}`),
-      );
-    }
-    rows.push(row);
-  }
-  rows.push([Markup.button.callback("✅ Confirm & Submit", "confirm")]);
-  return Markup.inlineKeyboard(rows);
-}
-
-function buildSkipKeyboard() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback("⏭️ Skip", "skip")],
-  ]);
-}
-
-function buildWalletKeyboard() {
-  return Markup.inlineKeyboard([
-    [Markup.button.url("☄️ Create NEAR Wallet", config.nearWalletUrl)],
-  ]);
-}
-
-function buildSkillsKeyboard(selected: string[]) {
-  const rows: ReturnType<typeof Markup.button.callback>[][] = [];
-  let row: ReturnType<typeof Markup.button.callback>[] = [];
-
-  for (const skill of ALLOWED_SKILLS) {
-    row.push(
-      Markup.button.callback(
-        selected.includes(skill) ? `✅ ${skill}` : skill,
-        `skill:${skill}`,
-      ),
-    );
-    if (row.length === 2) {
-      rows.push(row);
-      row = [];
-    }
-  }
-  if (row.length > 0) rows.push(row);
-  rows.push([
-    Markup.button.callback("✅ Done", "skills_done"),
-    Markup.button.callback("⏭️ Skip", "skip"),
-  ]);
-  return Markup.inlineKeyboard(rows);
-}
-
-function buildLinksKeyboard() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback("➕ Add Link", "link_add")],
-    [
-      Markup.button.callback("✅ Done", "links_done"),
-      Markup.button.callback("⏭️ Skip", "skip"),
-    ],
-  ]);
-}
-
-export function buildLinksConfirmKeyboard(label: string) {
-  return Markup.inlineKeyboard([
-    [
-      Markup.button.callback(
-        `✅ Use "${label}"`,
-        `link_label_confirm:${label}`,
-      ),
-    ],
-    [Markup.button.callback("✏️ Re-enter label", "link_add")],
-  ]);
 }
 
 function buildStartKeyboard(ctx: Context) {
   const username = config.botUsername || ctx.botInfo.username;
   return Markup.inlineKeyboard([
     [Markup.button.url("💬 Start Chat", `https://t.me/${username}`)],
+  ]);
+}
+
+function buildConfirmationKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        "✅ I’ll complete my profile",
+        "confirm_nomination",
+      ),
+    ],
+  ]);
+}
+
+function buildJoinKeyboard(joinUrl: string) {
+  return Markup.inlineKeyboard([
+    [Markup.button.url("🌐 Continue on NEAR Builders", joinUrl)],
   ]);
 }
 
@@ -171,61 +107,70 @@ async function replyToGroupCommand(
   });
 }
 
-async function sendLinksOverview(
-  userId: number,
-  ctx: Context,
-): Promise<void> {
-  const state = getSession(userId);
-  await ctx.telegram.sendMessage(
-    userId,
-    `${buildLinksOverview(state)}\n\nAdd a link or press Done when finished.`,
-    {
-      parse_mode: "HTML",
-      ...buildLinksKeyboard(),
-    },
-  );
-}
-
-async function sendNextQuestion(
-  userId: number,
-  ctx: Context,
-): Promise<void> {
-  const state = getSession(userId);
-  const step = state.editingField ?? state.currentStep;
-  if (!step || step === "done") return;
-
-  const common = {
-    parse_mode: "HTML" as const,
-  };
-  if (step === "near_address") {
-    await ctx.telegram.sendMessage(userId, STEP_QUESTIONS[step], {
-      ...common,
-      ...buildWalletKeyboard(),
-    });
-  } else if (step === "skills") {
-    await ctx.telegram.sendMessage(userId, STEP_QUESTIONS[step], {
-      ...common,
-      ...buildSkillsKeyboard(getSelectedSkills(state)),
-    });
-  } else if (step === "links") {
-    await sendLinksOverview(userId, ctx);
-  } else {
-    await ctx.telegram.sendMessage(userId, STEP_QUESTIONS[step], {
-      ...common,
-      ...buildSkipKeyboard(),
-    });
+async function issueHandoff(
+  user: User,
+  dependencies: BotDependencies,
+): Promise<NominationHandoff> {
+  const nomination = await dependencies.db.getNomination(user.id);
+  if (!nomination) {
+    throw new Error("No nomination found for this Telegram user");
   }
+
+  const handoff = await dependencies.createNomination({
+    source: "telegram",
+    sourceNominationId: String(nomination.id),
+    nomineeTelegramId: user.id,
+    nomineeUsername: user.username ?? null,
+    nominatedByTelegramId: nomination.nominated_by_user_id,
+    telegramGroupId: nomination.group_chat_id,
+  });
+  await dependencies.db.confirmNomination({
+    nominationId: nomination.id,
+    nominatedUserId: user.id,
+    websiteNominationId: handoff.nominationId,
+  });
+  return handoff;
 }
 
-async function sendSummary(userId: number, ctx: Context): Promise<void> {
+async function sendConfirmationPrompt(
+  ctx: Context,
+  userId: number,
+): Promise<void> {
   await ctx.telegram.sendMessage(
     userId,
-    `${buildSummary(getSession(userId))}\n\n<i>Use the buttons below to edit any field or confirm your submission.</i>`,
+    "🎉 <b>You’ve been nominated as a NEAR Builder!</b>\n\n" +
+      "Confirm that you’re ready to onboard. After you confirm, I’ll send " +
+      "you a secure link to complete your builder profile on the NEAR " +
+      "Builders website.",
     {
       parse_mode: "HTML",
-      ...buildEditKeyboard(),
+      ...buildConfirmationKeyboard(),
     },
   );
+}
+
+async function sendExistingHandoff(
+  ctx: Context,
+  dependencies: BotDependencies,
+): Promise<void> {
+  if (!ctx.from) return;
+  try {
+    const handoff = await issueHandoff(ctx.from, dependencies);
+    await ctx.reply(
+      "✅ You’ve already confirmed your nomination.\n\n" +
+        "Continue your onboarding using the secure link provided by the " +
+        "NEAR Builders website.",
+      buildJoinKeyboard(handoff.joinUrl),
+    );
+  } catch (error) {
+    logger.error(
+      { err: error, userId: ctx.from.id },
+      "Could not refresh nomination handoff",
+    );
+    await ctx.reply(
+      "❌ I couldn’t create your secure onboarding link. Please try again shortly.",
+    );
+  }
 }
 
 async function handleStart(
@@ -249,33 +194,30 @@ async function handleStart(
 
   if (!(await db.hasStartedBot(user.id))) {
     await ctx.reply(
-      "👋 Welcome to the <b>NEAR Builders</b> onboarding bot!\n\n" +
-        "You will need to be nominated to enter the bot!",
-      { parse_mode: "HTML" },
-    );
-    return;
-  }
-
-  if (await db.hasCompleted(user.id)) {
-    await ctx.reply(
-      "✅ You've already submitted your builder profile!\n\n" +
-        "The NEAR Builders team will be in touch. In the meantime, join @NearBuildersChat and follow @NearDevHub if you haven't already.\n\n" +
-        "Welcome to the community! 🌿",
+      "👋 Welcome to the <b>NEAR Builders</b> nomination bot!\n\n" +
+        "You need to be nominated by a community member before you can onboard.",
       { parse_mode: "HTML" },
     );
     return;
   }
 
   await db.registerUser(user.id, user.username, user.first_name);
-  startSession(user.id);
-  await ctx.reply(
-    "✅ You've been nominated! Let's set up your builder profile.\n\n" +
-      "I'll ask you a few quick questions. " +
-      "All fields are optional - type <code>skip</code> to leave any field blank.\n\n" +
-      "Let's get started! 🚀",
-    { parse_mode: "HTML" },
-  );
-  await sendNextQuestion(user.id, ctx);
+
+  if (await db.hasCompleted(user.id)) {
+    await ctx.reply(
+      "✅ Your builder profile has already been submitted.\n\n" +
+        "Welcome to the NEAR Builders community! 🌿",
+      { parse_mode: "HTML" },
+    );
+    return;
+  }
+
+  if (await db.hasConfirmed(user.id)) {
+    await sendExistingHandoff(ctx, dependencies);
+    return;
+  }
+
+  await sendConfirmationPrompt(ctx, user.id);
 }
 
 async function resolveTarget(
@@ -283,8 +225,7 @@ async function resolveTarget(
   username: string,
   dependencies: BotDependencies,
 ): Promise<NominationTarget> {
-  const { db } = dependencies;
-  const dbUser = await db.getUserByUsername(username);
+  const dbUser = await dependencies.db.getUserByUsername(username);
   if (dbUser) {
     logger.info(
       { username, userId: dbUser.user_id },
@@ -299,16 +240,12 @@ async function resolveTarget(
   }
 
   try {
-    // The Bot API types require a numeric ID, but this intentionally preserves
-    // the original bot's best-effort @username lookup before its pending path.
+    // Telegram's types require a numeric ID, but the API accepts a username
+    // here as a best-effort lookup before falling back to a pending claim.
     const member = await ctx.telegram.callApi("getChatMember", {
       chat_id: ctx.chat!.id,
       user_id: `@${username}` as unknown as number,
     });
-    logger.info(
-      { username, userId: member.user.id },
-      "Username resolved from Telegram",
-    );
     return {
       id: member.user.id,
       username: member.user.username ?? username,
@@ -318,7 +255,7 @@ async function resolveTarget(
   } catch (error) {
     logger.info(
       { username, err: error },
-      "Username could not be resolved; using pending nomination",
+      "Username unresolved; storing a pending nomination",
     );
     return {
       id: null,
@@ -360,15 +297,14 @@ async function handleNominate(
   if (!target) {
     await replyToGroupCommand(
       ctx,
-      "⚠️ Use this command as a <b>reply</b> to someone, or with a username:\n" +
+      "⚠️ Reply to someone with this command, or provide a username:\n" +
         "<code>/onboard @username</code>",
       { parse_mode: "HTML" },
     );
     return;
   }
-
   if (target.isBot) {
-    await replyToGroupCommand(ctx, "🤖 You can't nominate a bot!");
+    await replyToGroupCommand(ctx, "🤖 You can’t nominate a bot.");
     return;
   }
 
@@ -385,11 +321,10 @@ async function handleNominate(
       groupChatId: ctx.chat!.id,
       nominatedUsername: username,
     });
-    logger.info({ username }, "Pending nomination stored");
     await replyToGroupCommand(
       ctx,
-      `👋 ${targetMention}, you've been nominated as a NEAR Builder by ${invokerMention}!\n\n` +
-        "To complete your profile, please start a chat with me first by clicking the button below.",
+      `👋 ${targetMention}, you’ve been nominated as a NEAR Builder by ${invokerMention}!\n\n` +
+        "Start a private chat with me to confirm your nomination and receive your secure website onboarding link.",
       {
         parse_mode: "HTML",
         ...buildStartKeyboard(ctx),
@@ -399,24 +334,14 @@ async function handleNominate(
   }
 
   const alreadyStarted = await db.hasStartedBot(target.id);
-  const alreadyCompleted = alreadyStarted
-    ? await db.hasCompleted(target.id)
+  const alreadyConfirmed = alreadyStarted
+    ? await db.hasConfirmed(target.id)
     : false;
-  logger.info(
-    {
-      userId: target.id,
-      username: target.username,
-      alreadyStarted,
-      alreadyCompleted,
-    },
-    "Nomination status checked",
-  );
-
-  if (alreadyStarted && alreadyCompleted) {
+  if (alreadyConfirmed) {
     try {
       await ctx.react("🎉");
     } catch (error) {
-      logger.warn({ err: error }, "Could not set completed reaction");
+      logger.warn({ err: error }, "Could not set confirmed reaction");
     }
     return;
   }
@@ -437,27 +362,26 @@ async function handleNominate(
 
   if (alreadyStarted) {
     try {
-      startSession(target.id);
       await ctx.telegram.sendMessage(
         target.id,
-        `🎉 You've been nominated as a NEAR Builder by ${invokerMention}!\n\n` +
-          "Let's set up your builder profile. I'll ask you a few quick questions.\n" +
-          "Type <code>skip</code> at any point to leave a field blank.\n\n" +
-          "Let's go! 🚀",
-        { parse_mode: "HTML" },
+        `🎉 You’ve been nominated as a NEAR Builder by ${invokerMention}!\n\n` +
+          "Confirm that you’re ready to onboard, and I’ll send you a secure link to complete your profile on the NEAR Builders website.",
+        {
+          parse_mode: "HTML",
+          ...buildConfirmationKeyboard(),
+        },
       );
-      await sendNextQuestion(target.id, ctx);
       try {
         await ctx.react("👀");
       } catch (error) {
-        logger.warn({ err: error }, "Could not set in-progress reaction");
+        logger.warn({ err: error }, "Could not set pending reaction");
       }
     } catch (error) {
-      logger.warn({ userId: target.id, err: error }, "Failed to DM user");
+      logger.warn({ userId: target.id, err: error }, "Failed to DM nominee");
       await replyToGroupCommand(
         ctx,
-        `⚠️ ${targetMention} has been nominated, but I couldn't send them a DM. ` +
-          "Please start a chat with me first by clicking the button below.",
+        `⚠️ ${targetMention} has been nominated, but I couldn’t send them a DM. ` +
+          "Please start a chat with me using the button below.",
         {
           parse_mode: "HTML",
           ...buildStartKeyboard(ctx),
@@ -470,12 +394,12 @@ async function handleNominate(
   try {
     await ctx.react("👀");
   } catch (error) {
-    logger.warn({ err: error }, "Could not set in-progress reaction");
+    logger.warn({ err: error }, "Could not set pending reaction");
   }
   await replyToGroupCommand(
     ctx,
-    `👋 ${targetMention}, you've been nominated as a NEAR Builder by ${invokerMention}!\n\n` +
-      "To complete your profile, please start a chat with me first by clicking the button below.",
+    `👋 ${targetMention}, you’ve been nominated as a NEAR Builder by ${invokerMention}!\n\n` +
+      "Start a private chat with me to confirm your nomination and receive your secure website onboarding link.",
     {
       parse_mode: "HTML",
       ...buildStartKeyboard(ctx),
@@ -483,78 +407,18 @@ async function handleNominate(
   );
 }
 
-async function handleDmMessage(ctx: Context): Promise<void> {
-  if (
-    !isPrivate(ctx) ||
-    !ctx.from ||
-    !ctx.message ||
-    !("text" in ctx.message) ||
-    ctx.message.text.startsWith("/")
-  ) {
-    return;
-  }
-
-  const userId = ctx.from.id;
-  const text = ctx.message.text.trim();
-  const state = getSession(userId);
-
-  if (state.currentStep === null) {
-    await ctx.reply(
-      "Use /start to begin your builder profile onboarding, or wait to be nominated in a group!",
-    );
-    return;
-  }
-
-  if (state.currentStep === "done" && state.editingField === null) {
-    await sendSummary(userId, ctx);
-    return;
-  }
-
-  if (state.currentStep === "links" || state.editingField === "links") {
-    if (state.linksSubStep === "awaiting_label") {
-      if (!text) {
-        await ctx.reply(
-          "⚠️ Please enter a label, e.g. <code>github</code>",
-          { parse_mode: "HTML" },
-        );
-        return;
-      }
-      state.pendingLinkLabel = text;
-      state.linksSubStep = "awaiting_url";
-      await ctx.reply(
-        `🔗 Now enter the URL for <b>${escapeHtml(text)}</b>:`,
-        { parse_mode: "HTML" },
-      );
-      return;
-    }
-
-    if (state.linksSubStep === "awaiting_url") {
-      if (!text) {
-        await ctx.reply("⚠️ Please enter a URL.", { parse_mode: "HTML" });
-        return;
-      }
-      addLink(state, state.pendingLinkLabel ?? "link", text);
-      state.linksSubStep = null;
-      state.pendingLinkLabel = null;
-      await sendLinksOverview(userId, ctx);
-      return;
-    }
-  }
-
-  const response = applyAnswer(state, text);
-  if (response) {
-    await ctx.reply(response, { parse_mode: "HTML" });
-    if (response.startsWith("⚠️")) return;
-  }
-
-  const step = nextStep(state);
-  if (step === "done") await sendSummary(userId, ctx);
-  else await sendNextQuestion(userId, ctx);
-}
-
 function callbackData(ctx: Context): string | null {
   if (!ctx.callbackQuery || !("data" in ctx.callbackQuery)) return null;
   return ctx.callbackQuery.data;
+}
+
+async function handleDmMessage(ctx: Context): Promise<void> {
+  if (!isPrivate(ctx) || !ctx.message || !("text" in ctx.message)) return;
+  if (ctx.message.text.startsWith("/")) return;
+  await ctx.reply(
+    "Profile onboarding now happens on the NEAR Builders website. " +
+      "Use /start to confirm your nomination and get a secure join link.",
+  );
 }
 
 async function handleCallback(
@@ -564,157 +428,39 @@ async function handleCallback(
   if (!ctx.from) return;
   const data = callbackData(ctx);
   if (!data) return;
-
-  const userId = ctx.from.id;
-  const state = getSession(userId);
-
-  if (
-    data === "skip" &&
-    (state.currentStep === "near_address" ||
-      state.editingField === "near_address")
-  ) {
-    await ctx.answerCbQuery(
-      "NEAR address is required - please enter your address.",
-      { show_alert: true },
+  if (data !== "confirm_nomination") {
+    await acknowledgeCallbackQuery(() =>
+      ctx.answerCbQuery(
+        "This onboarding flow has moved to the website. Send /start for a new secure link.",
+        { show_alert: true },
+      ),
     );
     return;
   }
-  await ctx.answerCbQuery();
+  const acknowledged = await acknowledgeCallbackQuery(() =>
+    ctx.answerCbQuery(),
+  );
+  if (!acknowledged) return;
 
-  if (data === "confirm") {
-    await ctx.editMessageText("⏳ Submitting your profile...");
-    const nomination = await dependencies.db.getNomination(userId);
-    const result = await dependencies.submitBuilder({
-      payload: buildApiPayload(state),
-      userId,
-      nearAddress: state.data.near_address,
-      nominatedByUserId: nomination?.nominated_by_user_id ?? null,
-      groupChatId: nomination?.group_chat_id ?? null,
-    });
-
-    if (result.success) {
-      clearSession(userId);
-      await dependencies.db.markCompleted(userId);
-      await ctx.telegram.sendMessage(
-        userId,
-        "🎉 <b>Your profile has been submitted and is now in review!</b>\n\n" +
-          "The NEAR Builders team will be in touch. In the meantime, join @NearBuildersChat and follow @NearDevHub if you haven't already.\n\n" +
-          "Welcome to the community! 🌿",
-        { parse_mode: "HTML" },
-      );
-    } else {
-      logger.error(
-        { userId, error: result.message },
-        "API submission failed",
-      );
-      await ctx.telegram.sendMessage(
-        userId,
-        "❌ Something went wrong submitting your profile. Please try again in a moment.\n\n" +
-          `<i>Error: ${escapeHtml(result.message)}</i>`,
-        {
-          parse_mode: "HTML",
-          ...buildEditKeyboard(),
-        },
-      );
-    }
-    return;
-  }
-
-  if (data.startsWith("skill:")) {
-    toggleSkill(state, data.slice("skill:".length));
-    try {
-      await ctx.editMessageReplyMarkup(
-        buildSkillsKeyboard(getSelectedSkills(state)).reply_markup,
-      );
-    } catch {
-      // Telegram returns an error when the keyboard did not change.
-    }
-    return;
-  }
-
-  if (data === "skills_done") {
-    const step = nextStep(state);
-    if (step === "done") await sendSummary(userId, ctx);
-    else await sendNextQuestion(userId, ctx);
-    return;
-  }
-
-  if (data === "link_add") {
-    state.linksSubStep = "awaiting_label";
-    state.pendingLinkLabel = null;
-    await ctx.telegram.sendMessage(
-      userId,
-      "🏷 Enter a label for this link, e.g. <code>github</code>, <code>twitter</code>, <code>website</code>:",
-      { parse_mode: "HTML" },
+  try {
+    const handoff = await issueHandoff(ctx.from, dependencies);
+    await ctx.editMessageText(
+      "✅ <b>Nomination confirmed!</b>\n\n" +
+        "Complete your builder profile using the secure link provided by " +
+        "the NEAR Builders website.",
+      {
+        parse_mode: "HTML",
+        ...buildJoinKeyboard(handoff.joinUrl),
+      },
     );
-    return;
-  }
-
-  if (data.startsWith("link_label_confirm:")) {
-    const label = data.slice("link_label_confirm:".length);
-    state.linksSubStep = "awaiting_url";
-    state.pendingLinkLabel = label;
-    await ctx.telegram.sendMessage(
-      userId,
-      `🔗 Now enter the URL for <b>${escapeHtml(label)}</b>:`,
-      { parse_mode: "HTML" },
+  } catch (error) {
+    logger.error(
+      { err: error, userId: ctx.from.id },
+      "Could not create nomination handoff",
     );
-    return;
-  }
-
-  if (data === "links_done") {
-    state.linksSubStep = null;
-    state.pendingLinkLabel = null;
-    const step = nextStep(state);
-    if (step === "done") await sendSummary(userId, ctx);
-    else await sendNextQuestion(userId, ctx);
-    return;
-  }
-
-  if (data === "skip") {
-    skipCurrentStep(state);
-    const step = nextStep(state);
-    if (step === "done") await sendSummary(userId, ctx);
-    else await sendNextQuestion(userId, ctx);
-    return;
-  }
-
-  if (data.startsWith("edit:")) {
-    const field = data.slice("edit:".length) as Step;
-    if (!STEPS.includes(field)) return;
-
-    state.editingField = field;
-    await ctx.editMessageText(buildSummary(state), {
-      parse_mode: "HTML",
-    });
-
-    if (field === "near_address") {
-      await ctx.telegram.sendMessage(
-        userId,
-        `✏️ <b>Editing NEAR Address</b>\n\n${STEP_QUESTIONS.near_address}`,
-        {
-          parse_mode: "HTML",
-          ...buildWalletKeyboard(),
-        },
-      );
-    } else if (field === "skills") {
-      await ctx.telegram.sendMessage(
-        userId,
-        `✏️ <b>Editing Skills</b>\n\n${STEP_QUESTIONS.skills}`,
-        {
-          parse_mode: "HTML",
-          ...buildSkillsKeyboard(getSelectedSkills(state)),
-        },
-      );
-    } else if (field === "links") {
-      await sendLinksOverview(userId, ctx);
-    } else {
-      await ctx.telegram.sendMessage(
-        userId,
-        `✏️ <b>Editing ${STEP_LABELS[field]}</b>\n\n${STEP_QUESTIONS[field]}`,
-        { parse_mode: "HTML" },
-      );
-    }
+    await ctx.reply(
+      "❌ I couldn’t create your secure onboarding link. Please try again shortly.",
+    );
   }
 }
 

@@ -3,14 +3,18 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Telegram bot for nominating and onboarding builders to the NEAR ecosystem",
+  "description": "Telegram nomination and website onboarding handoff for NEAR builders",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres",
+    "db:up": "docker compose up -d --wait postgres",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
+    "test": "tsx --test src/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
