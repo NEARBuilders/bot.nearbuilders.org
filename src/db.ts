@@ -103,9 +103,7 @@ export async function hasStartedBot(userId: number): Promise<boolean> {
   return (result.rowCount ?? 0) > 0;
 }
 
-export async function hasPendingNomination(
-  username: string,
-): Promise<boolean> {
+export async function hasPendingNomination(username: string): Promise<boolean> {
   const result = await getPool().query(
     "SELECT 1 FROM pending_nominations WHERE LOWER(username) = LOWER($1)",
     [username],
@@ -287,11 +285,7 @@ export async function confirmNomination(input: {
        SET confirmed_at = COALESCE(confirmed_at, NOW()),
            website_nomination_id = $3
        WHERE id = $1 AND nominated_user_id = $2`,
-      [
-        input.nominationId,
-        input.nominatedUserId,
-        input.websiteNominationId,
-      ],
+      [input.nominationId, input.nominatedUserId, input.websiteNominationId],
     );
     if (result.rowCount !== 1) {
       throw new Error("Nomination was not found for this Telegram user");

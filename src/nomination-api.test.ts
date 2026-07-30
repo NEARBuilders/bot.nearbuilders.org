@@ -35,32 +35,22 @@ test("creates a website nomination and returns its handoff", async () => {
     fetch: fetchMock,
   });
 
-  assert.equal(
-    requestUrl,
-    "https://nearbuilders.org/api/builders/nominations",
-  );
+  assert.equal(requestUrl, "https://nearbuilders.org/api/builders/nominations");
   assert.equal(requestInit?.method, "POST");
   const headers = new Headers(requestInit?.headers);
   assert.equal(headers.get("x-api-key"), "test-api-key");
-  assert.equal(
-    headers.get("idempotency-key"),
-    "telegram-nomination:42",
-  );
+  assert.equal(headers.get("idempotency-key"), "telegram-nomination:42");
   assert.deepEqual(JSON.parse(String(requestInit?.body)), INPUT);
   assert.deepEqual(result, {
     nominationId: "nom_123",
-    joinUrl:
-      "https://join.nearbuilders.org/?nomination=opaque-token",
+    joinUrl: "https://join.nearbuilders.org/?nomination=opaque-token",
   });
 });
 
 test("accepts an idempotent nomination retry response", async () => {
   const fetchMock: typeof fetch = async (_input, init) => {
     const headers = new Headers(init?.headers);
-    assert.equal(
-      headers.get("idempotency-key"),
-      "telegram-nomination:42",
-    );
+    assert.equal(headers.get("idempotency-key"), "telegram-nomination:42");
     return Response.json({
       nominationId: "nom_123",
       joinUrl: "https://nearbuilders.org/join?nomination=opaque-token",

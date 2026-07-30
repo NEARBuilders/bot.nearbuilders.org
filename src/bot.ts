@@ -355,9 +355,7 @@ async function handleNominate(
     nominatedUserId: target.id,
     nominatedByUserId: invoker.id,
     groupChatId: ctx.chat!.id,
-    ...(target.username
-      ? { nominatedUsername: target.username }
-      : {}),
+    ...(target.username ? { nominatedUsername: target.username } : {}),
   });
 
   if (alreadyStarted) {

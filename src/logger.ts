@@ -11,6 +11,9 @@ const logStream = createStream("bot.log", {
   teeToStdout: true,
 });
 
-export const logger = pino({ level: process.env.LOG_LEVEL ?? "info" }, logStream);
+export const logger = pino(
+  { level: process.env.LOG_LEVEL ?? "info" },
+  logStream,
+);
 
 logger.info({ logPath }, "Logging initialized");

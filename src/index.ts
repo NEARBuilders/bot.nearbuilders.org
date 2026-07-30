@@ -53,15 +53,12 @@ async function main(): Promise<void> {
   process.once("SIGTERM", () => stop("SIGTERM"));
 
   try {
-    await bot.launch(
-      { allowedUpdates: ALL_UPDATE_TYPES },
-      () => {
-        logger.info(
-          { username: bot.botInfo?.username },
-          "Bot is running with long polling",
-        );
-      },
-    );
+    await bot.launch({ allowedUpdates: ALL_UPDATE_TYPES }, () => {
+      logger.info(
+        { username: bot.botInfo?.username },
+        "Bot is running with long polling",
+      );
+    });
   } finally {
     await db.closeDb();
   }
