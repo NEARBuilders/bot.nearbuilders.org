@@ -4,8 +4,8 @@
 
 The maintained application is a Node.js 20+ TypeScript Telegram bot. Production
 code lives in `src/`: `index.ts` starts polling, `bot.ts` defines Telegram
-handlers, `db.ts` owns PostgreSQL access, and `nomination-api.ts` requests the
-website handoff. Configuration and logging are in `config.ts` and
+handlers, and `nomination-api.ts` requests website-owned nomination and lifecycle
+state. Configuration and logging are in `config.ts` and
 `logger.ts`. `src-old/` is the archived Python implementation;
 use it only as a migration reference. Compiled output goes to `dist/`, while
 runtime logs go to `logs/`; neither should be committed. `PARITY.md` records the
@@ -20,8 +20,8 @@ Python-to-TypeScript behavior audit.
 - `npm run build` compiles `src/` into `dist/`.
 - `npm start` runs the previously compiled `dist/index.js`.
 
-Copy `.env.example` to `.env` and provide Telegram, PostgreSQL, and NEAR
-Builders credentials before running the bot.
+Copy `.env.example` to `.env` and provide Telegram and NEAR Builders credentials
+before running the bot.
 
 ## Coding Style & Naming Conventions
 
@@ -40,8 +40,8 @@ required static check.
 Tests use Node's built-in test runner through `tsx`; keep them near the source
 as `*.test.ts`. For every change, run `npm test`, `npm run typecheck`, and
 `npm run build`. Manually exercise affected Telegram flows against a test bot
-and database, especially nomination, confirmation, API failure, and website
-handoff paths. No coverage threshold is currently configured.
+and deployed API, especially nomination, recovery, API failure, lifecycle, and
+website handoff paths. No coverage threshold is currently configured.
 
 ## Commit & Pull Request Guidelines
 
@@ -55,5 +55,5 @@ change.
 
 ## Security & Configuration
 
-Treat bot tokens, database URLs, and signing secrets as confidential. Use safe
-placeholders in `.env.example`; validate external input before database use.
+Treat bot tokens, API keys, and signing secrets as confidential. Use safe
+placeholders in `.env.example`; validate external input before API use.

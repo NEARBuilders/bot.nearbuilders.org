@@ -1,7 +1,6 @@
 import type { Types } from "telegraf";
 import { clearCommandMenus, createBot } from "./bot.js";
 import { config } from "./config.js";
-import * as db from "./db.js";
 import { logger } from "./logger.js";
 
 const ALL_UPDATE_TYPES = [
@@ -33,9 +32,6 @@ async function main(): Promise<void> {
     throw new Error("NEARBUILDERS_API_KEY is not set in .env");
   }
 
-  await db.setupDb();
-  logger.info("Database tables ready");
-
   const bot = createBot(config.telegramBotToken);
   await clearCommandMenus(bot);
 
@@ -52,16 +48,12 @@ async function main(): Promise<void> {
   process.once("SIGINT", () => stop("SIGINT"));
   process.once("SIGTERM", () => stop("SIGTERM"));
 
-  try {
-    await bot.launch({ allowedUpdates: ALL_UPDATE_TYPES }, () => {
-      logger.info(
-        { username: bot.botInfo?.username },
-        "Bot is running with long polling",
-      );
-    });
-  } finally {
-    await db.closeDb();
-  }
+  await bot.launch({ allowedUpdates: ALL_UPDATE_TYPES }, () => {
+    logger.info(
+      { username: bot.botInfo?.username },
+      "Bot is running with long polling",
+    );
+  });
 }
 
 main().catch((error: unknown) => {

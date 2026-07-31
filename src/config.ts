@@ -2,7 +2,6 @@ import "dotenv/config";
 
 export const config = {
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? "",
-  databaseUrl: process.env.DATABASE_URL ?? "",
   nearNominationUrl:
     process.env.NEAR_NOMINATION_URL ??
     "https://nearbuilders.org/api/builders/nominations",

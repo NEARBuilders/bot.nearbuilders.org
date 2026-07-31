@@ -1,38 +1,32 @@
-import { Markup, Telegraf, type Context } from "telegraf";
+import { Agent as HttpsAgent } from "node:https";
+import { Markup, Telegraf, TelegramError, type Context } from "telegraf";
 import { message } from "telegraf/filters";
 import type { User } from "telegraf/types";
 import { acknowledgeCallbackQuery } from "./callback-query.js";
 import { config } from "./config.js";
-import * as defaultDb from "./db.js";
 import { logger } from "./logger.js";
 import {
-  createNomination as createNominationDefault,
-  type NominationHandoff,
+  NominationApiError,
+  nominationApi as defaultNominationApi,
+  type Nomination,
 } from "./nomination-api.js";
 
-type HandlerDatabase = Pick<
-  typeof defaultDb,
-  | "hasStartedBot"
-  | "claimPendingNomination"
-  | "registerUser"
-  | "hasCompleted"
-  | "hasConfirmed"
-  | "getUserByUsername"
-  | "addPendingNomination"
-  | "logNomination"
-  | "getNomination"
-  | "confirmNomination"
->;
-
 export interface BotDependencies {
-  db: HandlerDatabase;
-  createNomination: typeof createNominationDefault;
+  nominations: Pick<
+    typeof defaultNominationApi,
+    "createNomination" | "claimNomination"
+  >;
 }
 
 const productionDependencies: BotDependencies = {
-  db: defaultDb,
-  createNomination: createNominationDefault,
+  nominations: defaultNominationApi,
 };
+
+const telegramAgent = new HttpsAgent({
+  family: 4,
+  keepAlive: true,
+  keepAliveMsecs: 10_000,
+});
 
 interface NominationTarget {
   id: number | null;
@@ -65,33 +59,25 @@ function mentionUserId(userId: number, label: string): string {
 }
 
 function mentionTarget(target: NominationTarget): string {
-  if (target.id !== null) {
-    return mentionUserId(target.id, target.firstName);
-  }
+  if (target.id !== null) return mentionUserId(target.id, target.firstName);
   return `@${escapeHtml(target.username ?? target.firstName)}`;
 }
 
-function buildStartKeyboard(ctx: Context) {
-  const username = config.botUsername || ctx.botInfo.username;
-  return Markup.inlineKeyboard([
-    [Markup.button.url("💬 Start Chat", `https://t.me/${username}`)],
-  ]);
+function botUsername(ctx: Context): string {
+  return config.botUsername || ctx.botInfo.username;
 }
 
-function buildConfirmationKeyboard() {
+function buildStartKeyboard(ctx: Context, nominationId: string) {
+  const startUrl = new URL(`https://t.me/${botUsername(ctx)}`);
+  startUrl.searchParams.set("start", nominationId);
   return Markup.inlineKeyboard([
-    [
-      Markup.button.callback(
-        "✅ I’ll complete my profile",
-        "confirm_nomination",
-      ),
-    ],
+    [Markup.button.url("💬 Start Chat", startUrl.toString())],
   ]);
 }
 
 function buildJoinKeyboard(joinUrl: string) {
   return Markup.inlineKeyboard([
-    [Markup.button.url("🌐 Continue on NEAR Builders", joinUrl)],
+    [Markup.button.url("✅ I’ll complete my profile", joinUrl)],
   ]);
 }
 
@@ -107,70 +93,95 @@ async function replyToGroupCommand(
   });
 }
 
-async function issueHandoff(
-  user: User,
-  dependencies: BotDependencies,
-): Promise<NominationHandoff> {
-  const nomination = await dependencies.db.getNomination(user.id);
-  if (!nomination) {
-    throw new Error("No nomination found for this Telegram user");
+function isExpectedDirectMessageRestriction(error: unknown): boolean {
+  if (
+    !(error instanceof TelegramError) ||
+    (error.code !== 400 && error.code !== 403)
+  ) {
+    return false;
   }
-
-  const handoff = await dependencies.createNomination({
-    source: "telegram",
-    sourceNominationId: String(nomination.id),
-    nomineeTelegramId: user.id,
-    nomineeUsername: user.username ?? null,
-    nominatedByTelegramId: nomination.nominated_by_user_id,
-    telegramGroupId: nomination.group_chat_id,
-  });
-  await dependencies.db.confirmNomination({
-    nominationId: nomination.id,
-    nominatedUserId: user.id,
-    websiteNominationId: handoff.nominationId,
-  });
-  return handoff;
+  const description = error.description.toLowerCase();
+  return [
+    "bot can't initiate conversation",
+    "bot was blocked",
+    "chat not found",
+    "user is deactivated",
+  ].some((message) => description.includes(message));
 }
 
-async function sendConfirmationPrompt(
+async function reactCosmetically(
   ctx: Context,
-  userId: number,
+  emoji: "👀" | "🎉",
 ): Promise<void> {
-  await ctx.telegram.sendMessage(
-    userId,
-    "🎉 <b>You’ve been nominated as a NEAR Builder!</b>\n\n" +
-      "Confirm that you’re ready to onboard. After you confirm, I’ll send " +
-      "you a secure link to complete your builder profile on the NEAR " +
-      "Builders website.",
-    {
-      parse_mode: "HTML",
-      ...buildConfirmationKeyboard(),
-    },
-  );
-}
-
-async function sendExistingHandoff(
-  ctx: Context,
-  dependencies: BotDependencies,
-): Promise<void> {
-  if (!ctx.from) return;
   try {
-    const handoff = await issueHandoff(ctx.from, dependencies);
-    await ctx.reply(
-      "✅ You’ve already confirmed your nomination.\n\n" +
-        "Continue your onboarding using the secure link provided by the " +
-        "NEAR Builders website.",
-      buildJoinKeyboard(handoff.joinUrl),
-    );
+    await ctx.react(emoji);
   } catch (error) {
-    logger.error(
-      { err: error, userId: ctx.from.id },
-      "Could not refresh nomination handoff",
-    );
-    await ctx.reply(
-      "❌ I couldn’t create your secure onboarding link. Please try again shortly.",
+    logger.warn(
+      {
+        err: error,
+        emoji,
+        updateId: ctx.update.update_id,
+        chatId: ctx.chat?.id,
+      },
+      "Could not set nomination reaction",
     );
   }
+}
+
+function lifecycleMessage(
+  status: Nomination["status"],
+  subject: string,
+): string {
+  switch (status) {
+    case "awaiting_claim":
+      return `👋 ${subject} has been nominated and needs to start a private chat with me.`;
+    case "awaiting_profile":
+      return `✅ ${subject} has already been nominated. I’ll resend the existing onboarding handoff.`;
+    case "under_review":
+      return `🔎 ${subject}’s builder profile is already under review.`;
+    case "processing":
+      return `⏳ ${subject}’s builder application is being processed.`;
+    case "accepted":
+      return `🎉 ${subject} has already been accepted as a NEAR Builder.`;
+    case "rejected":
+      return `ℹ️ ${subject}’s builder application was not accepted. Any new submission should use the website.`;
+    case "removed":
+      return `ℹ️ ${subject}’s builder profile has been removed. Any new submission should use the website.`;
+    case "processing_failed":
+      return `⚠️ ${subject}’s builder application could not be processed. An administrator can retry it.`;
+  }
+}
+
+async function sendPrivateNominationStatus(
+  ctx: Context,
+  nomination: Nomination,
+): Promise<void> {
+  if (nomination.status === "awaiting_profile") {
+    await ctx.reply(
+      "🎉 <b>You’ve been nominated as a NEAR Builder!</b>\n\n" +
+        "Complete your builder profile using your secure NEAR Builders link.",
+      { parse_mode: "HTML", ...buildJoinKeyboard(nomination.joinUrl) },
+    );
+    return;
+  }
+
+  const messages: Record<
+    Exclude<Nomination["status"], "awaiting_profile">,
+    string
+  > = {
+    awaiting_claim:
+      "⚠️ Your Telegram identity still needs verification. Reopen the nomination link.",
+    under_review: "🔎 Your builder profile is under review.",
+    processing: "⏳ Your builder application is being processed.",
+    accepted: "🎉 You’ve been accepted as a NEAR Builder.",
+    rejected:
+      "ℹ️ Your builder application was not accepted. Any new submission should use the website.",
+    removed:
+      "ℹ️ Your builder profile has been removed. Any new submission should use the website.",
+    processing_failed:
+      "⚠️ Your builder application could not be processed. An administrator can retry it.",
+  };
+  await ctx.reply(messages[nomination.status]);
 }
 
 async function handleStart(
@@ -178,91 +189,97 @@ async function handleStart(
   dependencies: BotDependencies,
 ): Promise<void> {
   if (!isPrivate(ctx) || !ctx.from) return;
-  const user = ctx.from;
-  const { db } = dependencies;
-
-  if (user.username && !(await db.hasStartedBot(user.id))) {
-    const pending = await db.claimPendingNomination(user.id, user.username);
-    if (pending) {
-      logger.info(
-        { username: user.username, userId: user.id },
-        "Claimed pending nomination",
-      );
-      await db.registerUser(user.id, user.username, user.first_name);
-    }
-  }
-
-  if (!(await db.hasStartedBot(user.id))) {
+  const startPayload =
+    ctx.message && "text" in ctx.message
+      ? ctx.message.text.trim().split(/\s+/, 2)[1]?.trim()
+      : undefined;
+  if (startPayload && !/^[A-Za-z0-9_-]{1,64}$/.test(startPayload)) {
     await ctx.reply(
-      "👋 Welcome to the <b>NEAR Builders</b> nomination bot!\n\n" +
-        "You need to be nominated by a community member before you can onboard.",
-      { parse_mode: "HTML" },
+      "⚠️ This nomination link is invalid. Ask for a new /onboard nomination.",
     );
     return;
-  }
-
-  await db.registerUser(user.id, user.username, user.first_name);
-
-  if (await db.hasCompleted(user.id)) {
-    await ctx.reply(
-      "✅ Your builder profile has already been submitted.\n\n" +
-        "Welcome to the NEAR Builders community! 🌿",
-      { parse_mode: "HTML" },
-    );
-    return;
-  }
-
-  if (await db.hasConfirmed(user.id)) {
-    await sendExistingHandoff(ctx, dependencies);
-    return;
-  }
-
-  await sendConfirmationPrompt(ctx, user.id);
-}
-
-async function resolveTarget(
-  ctx: Context,
-  username: string,
-  dependencies: BotDependencies,
-): Promise<NominationTarget> {
-  const dbUser = await dependencies.db.getUserByUsername(username);
-  if (dbUser) {
-    logger.info(
-      { username, userId: dbUser.user_id },
-      "Username resolved from database",
-    );
-    return {
-      id: dbUser.user_id,
-      username: dbUser.username,
-      firstName: dbUser.first_name ?? dbUser.username ?? username,
-      isBot: false,
-    };
   }
 
   try {
-    // Telegram's types require a numeric ID, but the API accepts a username
-    // here as a best-effort lookup before falling back to a pending claim.
-    const member = await ctx.telegram.callApi("getChatMember", {
-      chat_id: ctx.chat!.id,
-      user_id: `@${username}` as unknown as number,
+    const nomination = await dependencies.nominations.claimNomination({
+      ...(startPayload ? { nominationId: startPayload } : {}),
+      nomineeTelegramId: ctx.from.id,
+      nomineeUsername: ctx.from.username ?? null,
     });
-    return {
-      id: member.user.id,
-      username: member.user.username ?? username,
-      firstName: member.user.first_name,
-      isBot: member.user.is_bot,
-    };
+    await sendPrivateNominationStatus(ctx, nomination);
   } catch (error) {
-    logger.info(
-      { username, err: error },
-      "Username unresolved; storing a pending nomination",
+    if (error instanceof NominationApiError && error.status === 404) {
+      await ctx.reply(
+        "👋 Welcome to the NEAR Builders nomination bot. You need a nomination before you can onboard.",
+      );
+      return;
+    }
+    if (error instanceof NominationApiError && error.status === 403) {
+      await ctx.reply(
+        "⚠️ This nomination does not match your Telegram account or current username. Ask for a new nomination.",
+      );
+      return;
+    }
+    logger.error(
+      {
+        err: error,
+        userId: ctx.from.id,
+        nominationId: startPayload,
+        updateId: ctx.update.update_id,
+      },
+      "Could not recover Telegram nomination",
     );
-    return {
-      id: null,
-      username,
-      firstName: username,
-      isBot: false,
-    };
+    await ctx.reply(
+      "❌ I couldn’t load your nomination. Please try again shortly.",
+    );
+  }
+}
+
+function resolveTarget(ctx: Context): NominationTarget | null {
+  if (!ctx.message || !("text" in ctx.message)) return null;
+  const argument = ctx.message.text.split(/\s+/)[1];
+  if (argument) {
+    const username = argument.replace(/^@/, "");
+    if (!/^[A-Za-z0-9_]{1,32}$/.test(username)) return null;
+    return { id: null, username, firstName: username, isBot: false };
+  }
+  const replyUser = ctx.message.reply_to_message?.from;
+  if (!replyUser) return null;
+  return {
+    id: replyUser.id,
+    username: replyUser.username ?? null,
+    firstName: replyUser.first_name,
+    isBot: replyUser.is_bot,
+  };
+}
+
+async function sendNomineeHandoff(
+  ctx: Context,
+  target: NominationTarget & { id: number },
+  nomination: Extract<Nomination, { status: "awaiting_profile" }>,
+): Promise<"sent" | "restricted" | "failed"> {
+  try {
+    await ctx.telegram.sendMessage(
+      target.id,
+      nomination.created
+        ? "🎉 <b>You’ve been nominated as a NEAR Builder!</b>\n\nComplete your profile using the secure website link below."
+        : "✅ <b>You’ve already been nominated.</b>\n\nHere is your existing secure website onboarding link.",
+      { parse_mode: "HTML", ...buildJoinKeyboard(nomination.joinUrl) },
+    );
+    return "sent";
+  } catch (error) {
+    if (isExpectedDirectMessageRestriction(error)) {
+      logger.info(
+        { userId: target.id, updateId: ctx.update.update_id },
+        "Nominee must start the Telegram chat before receiving a direct message",
+      );
+      return "restricted";
+    }
+    logger.error(
+      { err: error, userId: target.id, updateId: ctx.update.update_id },
+      "Unexpected Telegram failure while sending nomination handoff",
+    );
+    return "failed";
   }
 }
 
@@ -270,34 +287,15 @@ async function handleNominate(
   ctx: Context,
   dependencies: BotDependencies,
 ): Promise<void> {
-  if (!isGroup(ctx) || !ctx.from || !ctx.message || !("text" in ctx.message)) {
+  if (!isGroup(ctx) || !ctx.from || !ctx.message || !("text" in ctx.message))
     return;
-  }
-
-  const invoker = ctx.from;
-  const argument = ctx.message.text.split(/\s+/)[1];
-  let target: NominationTarget | null = null;
-
-  if (argument) {
-    const username = argument.replace(/^@/, "");
-    if (username) target = await resolveTarget(ctx, username, dependencies);
-  } else if (
-    ctx.message.reply_to_message &&
-    ctx.message.reply_to_message.from
-  ) {
-    const replyUser = ctx.message.reply_to_message.from;
-    target = {
-      id: replyUser.id,
-      username: replyUser.username ?? null,
-      firstName: replyUser.first_name,
-      isBot: replyUser.is_bot,
-    };
-  }
-
+  const groupChatId = ctx.chat?.id;
+  if (typeof groupChatId !== "number") return;
+  const target = resolveTarget(ctx);
   if (!target) {
     await replyToGroupCommand(
       ctx,
-      "⚠️ Reply to someone with this command, or provide a username:\n" +
+      "⚠️ Reply to someone with this command, or provide a valid username:\n" +
         "<code>/onboard @username</code>",
       { parse_mode: "HTML" },
     );
@@ -309,169 +307,121 @@ async function handleNominate(
   }
 
   const targetMention = mentionTarget(target);
-  const invokerMention = mentionUser(invoker);
-  const { db } = dependencies;
-
-  if (target.id === null) {
-    const username = target.username;
-    if (!username) return;
-    await db.addPendingNomination(username, invoker.id, ctx.chat!.id);
-    await db.logNomination({
-      nominatedByUserId: invoker.id,
-      groupChatId: ctx.chat!.id,
-      nominatedUsername: username,
+  const invokerMention = mentionUser(ctx.from);
+  let nomination: Nomination;
+  try {
+    nomination = await dependencies.nominations.createNomination({
+      source: "telegram",
+      sourceNominationId: String(ctx.update.update_id),
+      nomineeTelegramId: target.id,
+      nomineeUsername: target.username,
+      nominatedByTelegramId: ctx.from.id,
+      telegramGroupId: groupChatId,
     });
+  } catch (error) {
+    logger.error(
+      {
+        err: error,
+        updateId: ctx.update.update_id,
+        chatId: groupChatId,
+        nomineeTelegramId: target.id,
+        nomineeUsername: target.username,
+      },
+      "Could not create Telegram nomination",
+    );
     await replyToGroupCommand(
       ctx,
-      `👋 ${targetMention}, you’ve been nominated as a NEAR Builder by ${invokerMention}!\n\n` +
-        "Start a private chat with me to confirm your nomination and receive your secure website onboarding link.",
-      {
-        parse_mode: "HTML",
-        ...buildStartKeyboard(ctx),
-      },
+      "❌ I couldn’t save this nomination. Please try again shortly.",
     );
     return;
   }
 
-  const alreadyStarted = await db.hasStartedBot(target.id);
-  const alreadyConfirmed = alreadyStarted
-    ? await db.hasConfirmed(target.id)
-    : false;
-  if (alreadyConfirmed) {
-    try {
-      await ctx.react("🎉");
-    } catch (error) {
-      logger.warn({ err: error }, "Could not set confirmed reaction");
-    }
+  if (nomination.status === "awaiting_claim") {
+    await replyToGroupCommand(
+      ctx,
+      nomination.created
+        ? `👋 ${targetMention}, you’ve been nominated as a NEAR Builder by ${invokerMention}!\n\nStart a private chat with me to continue.`
+        : `✅ ${targetMention} has already been nominated. Use the existing private-chat handoff below.`,
+      {
+        parse_mode: "HTML",
+        ...buildStartKeyboard(ctx, nomination.nominationId),
+      },
+    );
+    await reactCosmetically(ctx, "👀");
     return;
   }
 
-  await db.registerUser(
-    target.id,
-    target.username ?? undefined,
-    target.firstName,
-  );
-  await db.logNomination({
-    nominatedUserId: target.id,
-    nominatedByUserId: invoker.id,
-    groupChatId: ctx.chat!.id,
-    ...(target.username ? { nominatedUsername: target.username } : {}),
-  });
-
-  if (alreadyStarted) {
-    try {
-      await ctx.telegram.sendMessage(
-        target.id,
-        `🎉 You’ve been nominated as a NEAR Builder by ${invokerMention}!\n\n` +
-          "Confirm that you’re ready to onboard, and I’ll send you a secure link to complete your profile on the NEAR Builders website.",
-        {
-          parse_mode: "HTML",
-          ...buildConfirmationKeyboard(),
-        },
-      );
-      try {
-        await ctx.react("👀");
-      } catch (error) {
-        logger.warn({ err: error }, "Could not set pending reaction");
-      }
-    } catch (error) {
-      logger.warn({ userId: target.id, err: error }, "Failed to DM nominee");
+  if (nomination.status === "awaiting_profile" && target.id !== null) {
+    const delivery = await sendNomineeHandoff(
+      ctx,
+      { ...target, id: target.id },
+      nomination,
+    );
+    if (delivery === "sent") {
       await replyToGroupCommand(
         ctx,
-        `⚠️ ${targetMention} has been nominated, but I couldn’t send them a DM. ` +
-          "Please start a chat with me using the button below.",
+        nomination.created
+          ? `✅ ${targetMention} has been nominated by ${invokerMention}. I sent the onboarding link privately.`
+          : `✅ ${targetMention} was already nominated. I resent the existing onboarding link privately.`,
+        { parse_mode: "HTML" },
+      );
+      await reactCosmetically(ctx, "👀");
+      return;
+    }
+    if (delivery === "restricted") {
+      await replyToGroupCommand(
+        ctx,
+        `⚠️ ${targetMention} has been nominated, but must start a private chat before I can send the onboarding link.`,
         {
           parse_mode: "HTML",
-          ...buildStartKeyboard(ctx),
+          ...buildStartKeyboard(ctx, nomination.nominationId),
         },
       );
+      await reactCosmetically(ctx, "👀");
+      return;
     }
+    await replyToGroupCommand(
+      ctx,
+      `❌ The nomination was saved, but I couldn’t deliver ${targetMention}’s onboarding link. Please try again shortly.`,
+      { parse_mode: "HTML" },
+    );
     return;
   }
 
-  try {
-    await ctx.react("👀");
-  } catch (error) {
-    logger.warn({ err: error }, "Could not set pending reaction");
-  }
   await replyToGroupCommand(
     ctx,
-    `👋 ${targetMention}, you’ve been nominated as a NEAR Builder by ${invokerMention}!\n\n` +
-      "Start a private chat with me to confirm your nomination and receive your secure website onboarding link.",
+    lifecycleMessage(nomination.status, targetMention),
     {
       parse_mode: "HTML",
-      ...buildStartKeyboard(ctx),
     },
   );
-}
-
-function callbackData(ctx: Context): string | null {
-  if (!ctx.callbackQuery || !("data" in ctx.callbackQuery)) return null;
-  return ctx.callbackQuery.data;
+  if (nomination.status === "accepted") await reactCosmetically(ctx, "🎉");
 }
 
 async function handleDmMessage(ctx: Context): Promise<void> {
   if (!isPrivate(ctx) || !ctx.message || !("text" in ctx.message)) return;
   if (ctx.message.text.startsWith("/")) return;
   await ctx.reply(
-    "Profile onboarding now happens on the NEAR Builders website. " +
-      "Use /start to confirm your nomination and get a secure join link.",
+    "Profile onboarding happens on the NEAR Builders website. Send /start to recover your nomination and secure link.",
   );
 }
 
-async function handleCallback(
-  ctx: Context,
-  dependencies: BotDependencies,
-): Promise<void> {
-  if (!ctx.from) return;
-  const data = callbackData(ctx);
-  if (!data) return;
-  if (data !== "confirm_nomination") {
-    await acknowledgeCallbackQuery(() =>
-      ctx.answerCbQuery(
-        "This onboarding flow has moved to the website. Send /start for a new secure link.",
-        { show_alert: true },
-      ),
-    );
-    return;
-  }
-  const acknowledged = await acknowledgeCallbackQuery(() =>
-    ctx.answerCbQuery(),
+async function handleCallback(ctx: Context): Promise<void> {
+  if (!ctx.callbackQuery || !("data" in ctx.callbackQuery)) return;
+  await acknowledgeCallbackQuery(() =>
+    ctx.answerCbQuery(
+      "This bot-side onboarding flow has retired. Send /start to recover your website handoff.",
+      { show_alert: true },
+    ),
   );
-  if (!acknowledged) return;
-
-  try {
-    const handoff = await issueHandoff(ctx.from, dependencies);
-    await ctx.editMessageText(
-      "✅ <b>Nomination confirmed!</b>\n\n" +
-        "Complete your builder profile using the secure link provided by " +
-        "the NEAR Builders website.",
-      {
-        parse_mode: "HTML",
-        ...buildJoinKeyboard(handoff.joinUrl),
-      },
-    );
-  } catch (error) {
-    logger.error(
-      { err: error, userId: ctx.from.id },
-      "Could not create nomination handoff",
-    );
-    await ctx.reply(
-      "❌ I couldn’t create your secure onboarding link. Please try again shortly.",
-    );
-  }
 }
 
 export async function clearCommandMenus(bot: Telegraf): Promise<void> {
-  await Promise.all([
-    bot.telegram.setMyCommands([], { scope: { type: "default" } }),
-    bot.telegram.setMyCommands([], {
-      scope: { type: "all_group_chats" },
-    }),
-    bot.telegram.setMyCommands([], {
-      scope: { type: "all_private_chats" },
-    }),
-  ]);
+  await bot.telegram.setMyCommands([], { scope: { type: "default" } });
+  await bot.telegram.setMyCommands([], { scope: { type: "all_group_chats" } });
+  await bot.telegram.setMyCommands([], {
+    scope: { type: "all_private_chats" },
+  });
   logger.info("Bot command menus cleared");
 }
 
@@ -479,16 +429,31 @@ export function createBot(
   token: string,
   dependencies: BotDependencies = productionDependencies,
 ): Telegraf {
-  const bot = new Telegraf(token);
+  const bot = new Telegraf(token, { telegram: { agent: telegramAgent } });
   bot.start((ctx) => handleStart(ctx, dependencies));
   bot.command("onboard", (ctx) => handleNominate(ctx, dependencies));
   bot.on(message("text"), handleDmMessage);
-  bot.on("callback_query", (ctx) => handleCallback(ctx, dependencies));
-  bot.catch((error, ctx) => {
+  bot.on("callback_query", handleCallback);
+  bot.catch(async (error, ctx) => {
     logger.error(
-      { err: error, updateId: ctx.update.update_id },
+      {
+        err: error,
+        updateId: ctx.update.update_id,
+        chatId: ctx.chat?.id,
+        userId: ctx.from?.id,
+      },
       "Unhandled bot update error",
     );
+    try {
+      await ctx.reply(
+        "❌ Something went wrong while handling that request. Please try again shortly.",
+      );
+    } catch (replyError) {
+      logger.error(
+        { err: replyError, updateId: ctx.update.update_id },
+        "Could not send last-resort Telegram failure response",
+      );
+    }
   });
   return bot;
 }

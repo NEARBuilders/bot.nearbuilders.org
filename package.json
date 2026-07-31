@@ -9,9 +9,6 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "db:down": "docker compose down",
-    "db:logs": "docker compose logs -f postgres",
-    "db:up": "docker compose up -d --wait postgres",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "tsx --test src/*.test.ts",
@@ -19,14 +16,12 @@
   },
   "dependencies": {
     "dotenv": "17.2.1",
-    "pg": "8.16.3",
     "pino": "10.3.1",
     "rotating-file-stream": "3.2.9",
     "telegraf": "4.16.3"
   },
   "devDependencies": {
     "@types/node": "24.1.0",
-    "@types/pg": "8.15.5",
     "tsx": "4.23.1",
     "typescript": "7.0.2"
   }
