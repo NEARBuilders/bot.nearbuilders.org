@@ -1,7 +1,7 @@
 import type { Types } from "telegraf";
 import { clearCommandMenus, createBot } from "./bot.js";
 import { config } from "./config.js";
-import { logger } from "./logger.js";
+import { logEvent } from "./logger.js";
 
 const ALL_UPDATE_TYPES = [
   "message",
@@ -25,6 +25,7 @@ const ALL_UPDATE_TYPES = [
 ] satisfies Types.UpdateType[];
 
 async function main(): Promise<void> {
+  logEvent("info", "bot.startup.begin");
   if (!config.telegramBotToken) {
     throw new Error("TELEGRAM_BOT_TOKEN is not set in .env");
   }
@@ -36,27 +37,27 @@ async function main(): Promise<void> {
   await clearCommandMenus(bot);
 
   const stop = (signal: "SIGINT" | "SIGTERM") => {
+    logEvent("info", "bot.shutdown.requested", { signal });
     try {
       bot.stop(signal);
     } catch (error) {
-      logger.warn(
-        { err: error, signal },
-        "Bot stopped before polling initialized",
-      );
+      logEvent("warn", "bot.shutdown.before_polling", {
+        err: error,
+        signal,
+      });
     }
   };
   process.once("SIGINT", () => stop("SIGINT"));
   process.once("SIGTERM", () => stop("SIGTERM"));
 
   await bot.launch({ allowedUpdates: ALL_UPDATE_TYPES }, () => {
-    logger.info(
-      { username: bot.botInfo?.username },
-      "Bot is running with long polling",
-    );
+    logEvent("info", "bot.polling.started", {
+      usernameConfigured: Boolean(bot.botInfo?.username),
+    });
   });
 }
 
 main().catch((error: unknown) => {
-  logger.fatal({ err: error }, "Bot failed to start");
+  logEvent("fatal", "bot.startup.failed", { err: error });
   process.exitCode = 1;
 });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { logger } from "./logger.js";
 import {
   claimNomination,
   createNomination,
@@ -150,6 +151,68 @@ test("retries one timeout", async () => {
 
   assert.equal(calls, 2);
   assert.equal(result.status, "under_review");
+});
+
+test("logs retry metadata without request bodies or credentials", async () => {
+  type LogMethod = (fields: unknown, event?: string) => void;
+  type WritableLogger = { info: LogMethod; warn: LogMethod };
+  const writableLogger = logger as unknown as WritableLogger;
+  const originalInfo = writableLogger.info;
+  const originalWarn = writableLogger.warn;
+  const records: Array<{
+    level: "info" | "warn";
+    fields: Record<string, unknown>;
+    event: string;
+  }> = [];
+  writableLogger.info = (fields, event) => {
+    records.push({
+      level: "info",
+      fields: fields as Record<string, unknown>,
+      event: event ?? "",
+    });
+  };
+  writableLogger.warn = (fields, event) => {
+    records.push({
+      level: "warn",
+      fields: fields as Record<string, unknown>,
+      event: event ?? "",
+    });
+  };
+
+  let calls = 0;
+  try {
+    await createNomination(INPUT, {
+      ...OPTIONS,
+      fetch: async () => {
+        calls += 1;
+        if (calls === 1) throw new TypeError("temporary network failure");
+        return Response.json({
+          nominationId: "nom_logged",
+          status: "accepted",
+        });
+      },
+    });
+  } finally {
+    writableLogger.info = originalInfo;
+    writableLogger.warn = originalWarn;
+  }
+
+  const retry = records.find((record) => record.event === "nomination_api.retry");
+  assert.equal(retry?.level, "warn");
+  assert.equal(retry?.fields.attempt, 1);
+  assert.equal(retry?.fields.endpointPath, "/api/builders/nominations");
+  assert.equal(typeof retry?.fields.durationMs, "number");
+
+  const completed = records.find(
+    (record) => record.event === "nomination_api.completed",
+  );
+  assert.equal(completed?.fields.nominationId, "nom…ed");
+  assert.equal(completed?.fields.status, "accepted");
+  assert.equal(typeof completed?.fields.durationMs, "number");
+  for (const record of records) {
+    assert.equal("body" in record.fields, false);
+    assert.equal("apiKey" in record.fields, false);
+  }
 });
 
 for (const status of [408, 429, 500, 503]) {

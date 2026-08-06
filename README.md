@@ -11,7 +11,8 @@ onboarding links, proposal submission, and review lifecycle state.
 - Telegram Start Chat links carry the website nomination ID.
 - Deep-link and plain `/start` recover nominations through the Builders API.
 - Stable website onboarding links are sent directly as URL buttons.
-- Repeated nominations report the current website-owned lifecycle state.
+- Repeated nominations use the current website-owned lifecycle state; under-review/completed
+  nominations keep the v1-style 🎉 reaction without an extra group message.
 - Transient API failures are retried once with the same create idempotency key.
 - Expected Telegram DM restrictions fall back to Start Chat; unexpected failures are reported.
 - Polling, structured console output, and rotating `logs/bot.log` logs remain local runtime concerns.
@@ -45,6 +46,9 @@ NEARBUILDERS_API_KEY=your_api_key_here
 `BOT_USERNAME` is optional. The bot normally uses the username returned by Telegram.
 `NEAR_NOMINATION_URL` may point to loopback HTTP during development; non-loopback endpoints and
 website-issued join links must use HTTPS.
+`LOG_LEVEL` is optional and defaults to `info`. Logs are structured JSON, written to stdout and
+rotated in `logs/bot.log`. Flow events include Telegram/API outcomes, statuses, retries, and
+durations without logging message bodies, profile data, credentials, or full secure URLs.
 
 In BotFather, turn off **Bot Settings → Group Privacy** so the bot receives group commands.
 Command menus are cleared automatically on startup.

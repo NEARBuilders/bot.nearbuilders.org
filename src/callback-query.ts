@@ -1,5 +1,5 @@
 import { TelegramError } from "telegraf";
-import { logger } from "./logger.js";
+import { logEvent } from "./logger.js";
 
 const EXPIRED_CALLBACK_QUERY_DESCRIPTION =
   "Bad Request: query is too old and response timeout expired or query ID is invalid";
@@ -21,7 +21,9 @@ export async function acknowledgeCallbackQuery(
   } catch (error) {
     if (!isExpiredCallbackQueryError(error)) throw error;
 
-    logger.info("Ignored expired Telegram callback query");
+    logEvent("warn", "telegram.callback.expired", {
+      outcome: "ignored",
+    });
     return false;
   }
 }

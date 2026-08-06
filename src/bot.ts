@@ -4,7 +4,7 @@ import { message } from "telegraf/filters";
 import type { User } from "telegraf/types";
 import { acknowledgeCallbackQuery } from "./callback-query.js";
 import { config } from "./config.js";
-import { logger } from "./logger.js";
+import { logEvent, maskIdentifier } from "./logger.js";
 import {
   NominationApiError,
   nominationApi as defaultNominationApi,
@@ -81,6 +81,16 @@ function buildJoinKeyboard(joinUrl: string) {
   ]);
 }
 
+function buildNominationMessage(
+  targetMention: string,
+  invokerMention: string,
+): string {
+  return (
+    `👋 ${targetMention}, you've been nominated as a NEAR Builder by ${invokerMention}!\n\n` +
+    "To complete your profile, please start a chat with me first by clicking the button below."
+  );
+}
+
 async function replyToGroupCommand(
   ctx: Context,
   text: string,
@@ -116,15 +126,12 @@ async function reactCosmetically(
   try {
     await ctx.react(emoji);
   } catch (error) {
-    logger.warn(
-      {
-        err: error,
-        emoji,
-        updateId: ctx.update.update_id,
-        chatId: ctx.chat?.id,
-      },
-      "Could not set nomination reaction",
-    );
+    logEvent("warn", "telegram.reaction.failed", {
+      err: error,
+      emoji,
+      updateId: ctx.update.update_id,
+      chatId: ctx.chat?.id,
+    });
   }
 }
 
@@ -156,12 +163,34 @@ async function sendPrivateNominationStatus(
   ctx: Context,
   nomination: Nomination,
 ): Promise<void> {
+  const startedAt = Date.now();
   if (nomination.status === "awaiting_profile") {
     await ctx.reply(
-      "🎉 <b>You’ve been nominated as a NEAR Builder!</b>\n\n" +
-        "Complete your builder profile using your secure NEAR Builders link.",
+      "✅ You've been nominated! Let's set up your builder profile.\n\n" +
+        "Complete your builder profile using the secure NEAR Builders link below.",
       { parse_mode: "HTML", ...buildJoinKeyboard(nomination.joinUrl) },
     );
+    logEvent("info", "telegram.handoff.sent", {
+      updateId: ctx.update.update_id,
+      chatId: ctx.chat?.id,
+      userId: ctx.from?.id,
+      nominationId: maskIdentifier(nomination.nominationId),
+      status: nomination.status,
+      outcome: "website_handoff",
+      channel: "private",
+      buttonType: "website_join",
+      durationMs: Date.now() - startedAt,
+    });
+    logEvent("info", "telegram.start.response_sent", {
+      updateId: ctx.update.update_id,
+      chatId: ctx.chat?.id,
+      userId: ctx.from?.id,
+      nominationId: maskIdentifier(nomination.nominationId),
+      status: nomination.status,
+      outcome: "website_handoff",
+      buttonType: "website_join",
+      durationMs: Date.now() - startedAt,
+    });
     return;
   }
 
@@ -171,7 +200,10 @@ async function sendPrivateNominationStatus(
   > = {
     awaiting_claim:
       "⚠️ Your Telegram identity still needs verification. Reopen the nomination link.",
-    under_review: "🔎 Your builder profile is under review.",
+    under_review:
+      "✅ You've already submitted your builder profile!\n\n" +
+      "The NEAR Builders team will be in touch. In the meantime, join @NearBuildersChat and follow @NearDevHub if you haven't already.\n\n" +
+      "Welcome to the community! 🌿",
     processing: "⏳ Your builder application is being processed.",
     accepted: "🎉 You’ve been accepted as a NEAR Builder.",
     rejected:
@@ -182,6 +214,15 @@ async function sendPrivateNominationStatus(
       "⚠️ Your builder application could not be processed. An administrator can retry it.",
   };
   await ctx.reply(messages[nomination.status]);
+  logEvent("info", "telegram.start.response_sent", {
+    updateId: ctx.update.update_id,
+    chatId: ctx.chat?.id,
+    userId: ctx.from?.id,
+    nominationId: maskIdentifier(nomination.nominationId),
+    status: nomination.status,
+    outcome: "lifecycle_status",
+    durationMs: Date.now() - startedAt,
+  });
 }
 
 async function handleStart(
@@ -193,7 +234,20 @@ async function handleStart(
     ctx.message && "text" in ctx.message
       ? ctx.message.text.trim().split(/\s+/, 2)[1]?.trim()
       : undefined;
+  logEvent("info", "telegram.start.received", {
+    updateId: ctx.update.update_id,
+    chatId: ctx.chat?.id,
+    userId: ctx.from.id,
+    hasPayload: Boolean(startPayload),
+    nominationId: maskIdentifier(startPayload),
+  });
   if (startPayload && !/^[A-Za-z0-9_-]{1,64}$/.test(startPayload)) {
+    logEvent("warn", "telegram.start.invalid_payload", {
+      updateId: ctx.update.update_id,
+      chatId: ctx.chat?.id,
+      userId: ctx.from.id,
+      outcome: "invalid_payload",
+    });
     await ctx.reply(
       "⚠️ This nomination link is invalid. Ask for a new /onboard nomination.",
     );
@@ -206,29 +260,51 @@ async function handleStart(
       nomineeTelegramId: ctx.from.id,
       nomineeUsername: ctx.from.username ?? null,
     });
+    logEvent("info", "telegram.start.nomination_resolved", {
+      updateId: ctx.update.update_id,
+      chatId: ctx.chat?.id,
+      userId: ctx.from.id,
+      nominationId: maskIdentifier(nomination.nominationId),
+      status: nomination.status,
+      created: nomination.created,
+      outcome: startPayload ? "claimed" : "recovered",
+    });
     await sendPrivateNominationStatus(ctx, nomination);
   } catch (error) {
     if (error instanceof NominationApiError && error.status === 404) {
+      logEvent("info", "telegram.start.not_nominated", {
+        updateId: ctx.update.update_id,
+        chatId: ctx.chat?.id,
+        userId: ctx.from.id,
+        outcome: "not_nominated",
+      });
       await ctx.reply(
-        "👋 Welcome to the NEAR Builders nomination bot. You need a nomination before you can onboard.",
+        "👋 Welcome to the <b>NEAR Builders</b> onboarding bot!\n\n" +
+          "You will need to be nominated to enter the bot!",
+        { parse_mode: "HTML" },
       );
       return;
     }
     if (error instanceof NominationApiError && error.status === 403) {
+      logEvent("warn", "telegram.start.identity_rejected", {
+        updateId: ctx.update.update_id,
+        chatId: ctx.chat?.id,
+        userId: ctx.from.id,
+        nominationId: maskIdentifier(startPayload),
+        outcome: "identity_mismatch",
+      });
       await ctx.reply(
         "⚠️ This nomination does not match your Telegram account or current username. Ask for a new nomination.",
       );
       return;
     }
-    logger.error(
-      {
-        err: error,
-        userId: ctx.from.id,
-        nominationId: startPayload,
-        updateId: ctx.update.update_id,
-      },
-      "Could not recover Telegram nomination",
-    );
+    logEvent("error", "telegram.start.failed", {
+      err: error,
+      userId: ctx.from.id,
+      nominationId: maskIdentifier(startPayload),
+      updateId: ctx.update.update_id,
+      outcome: "api_failure",
+    });
     await ctx.reply(
       "❌ I couldn’t load your nomination. Please try again shortly.",
     );
@@ -257,28 +333,54 @@ async function sendNomineeHandoff(
   ctx: Context,
   target: NominationTarget & { id: number },
   nomination: Extract<Nomination, { status: "awaiting_profile" }>,
+  invokerMention: string,
 ): Promise<"sent" | "restricted" | "failed"> {
+  const startedAt = Date.now();
   try {
     await ctx.telegram.sendMessage(
       target.id,
-      nomination.created
-        ? "🎉 <b>You’ve been nominated as a NEAR Builder!</b>\n\nComplete your profile using the secure website link below."
-        : "✅ <b>You’ve already been nominated.</b>\n\nHere is your existing secure website onboarding link.",
+      `🎉 You've been nominated as a NEAR Builder by ${invokerMention}!\n\nComplete your profile using the secure website link below.`,
       { parse_mode: "HTML", ...buildJoinKeyboard(nomination.joinUrl) },
     );
+    logEvent("info", "telegram.handoff.sent", {
+      updateId: ctx.update.update_id,
+      groupChatId: ctx.chat?.id,
+      userId: target.id,
+      nominationId: maskIdentifier(nomination.nominationId),
+      status: nomination.status,
+      created: nomination.created,
+      outcome: "website_handoff",
+      buttonType: "website_join",
+      durationMs: Date.now() - startedAt,
+    });
     return "sent";
   } catch (error) {
     if (isExpectedDirectMessageRestriction(error)) {
-      logger.info(
-        { userId: target.id, updateId: ctx.update.update_id },
-        "Nominee must start the Telegram chat before receiving a direct message",
-      );
+      logEvent("warn", "telegram.handoff.restricted", {
+        userId: target.id,
+        updateId: ctx.update.update_id,
+        groupChatId: ctx.chat?.id,
+        nominationId: maskIdentifier(nomination.nominationId),
+        status: nomination.status,
+        created: nomination.created,
+        outcome: "telegram_chat_required",
+        buttonType: "start_chat",
+        telegramErrorCode: error instanceof TelegramError ? error.code : undefined,
+        durationMs: Date.now() - startedAt,
+      });
       return "restricted";
     }
-    logger.error(
-      { err: error, userId: target.id, updateId: ctx.update.update_id },
-      "Unexpected Telegram failure while sending nomination handoff",
-    );
+    logEvent("error", "telegram.handoff.failed", {
+      err: error,
+      userId: target.id,
+      updateId: ctx.update.update_id,
+      groupChatId: ctx.chat?.id,
+      nominationId: maskIdentifier(nomination.nominationId),
+      status: nomination.status,
+      created: nomination.created,
+      outcome: "telegram_failure",
+      durationMs: Date.now() - startedAt,
+    });
     return "failed";
   }
 }
@@ -291,18 +393,36 @@ async function handleNominate(
     return;
   const groupChatId = ctx.chat?.id;
   if (typeof groupChatId !== "number") return;
+  logEvent("info", "telegram.nomination.received", {
+    updateId: ctx.update.update_id,
+    groupChatId,
+    userId: ctx.from.id,
+    targetKind: ctx.message.text.split(/\s+/)[1] ? "username" : "reply",
+  });
   const target = resolveTarget(ctx);
   if (!target) {
+    logEvent("warn", "telegram.nomination.rejected", {
+      updateId: ctx.update.update_id,
+      groupChatId,
+      userId: ctx.from.id,
+      outcome: "invalid_target",
+    });
     await replyToGroupCommand(
       ctx,
-      "⚠️ Reply to someone with this command, or provide a valid username:\n" +
+      "⚠️ Use this command as a <b>reply</b> to someone, or with a username:\n" +
         "<code>/onboard @username</code>",
       { parse_mode: "HTML" },
     );
     return;
   }
   if (target.isBot) {
-    await replyToGroupCommand(ctx, "🤖 You can’t nominate a bot.");
+    logEvent("warn", "telegram.nomination.rejected", {
+      updateId: ctx.update.update_id,
+      groupChatId,
+      userId: ctx.from.id,
+      outcome: "bot_target",
+    });
+    await replyToGroupCommand(ctx, "🤖 You can't nominate a bot!");
     return;
   }
 
@@ -319,16 +439,14 @@ async function handleNominate(
       telegramGroupId: groupChatId,
     });
   } catch (error) {
-    logger.error(
-      {
-        err: error,
-        updateId: ctx.update.update_id,
-        chatId: groupChatId,
-        nomineeTelegramId: target.id,
-        nomineeUsername: target.username,
-      },
-      "Could not create Telegram nomination",
-    );
+    logEvent("error", "telegram.nomination.failed", {
+      err: error,
+      updateId: ctx.update.update_id,
+      groupChatId,
+      userId: ctx.from.id,
+      nomineeTelegramId: target.id,
+      outcome: "api_failure",
+    });
     await replyToGroupCommand(
       ctx,
       "❌ I couldn’t save this nomination. Please try again shortly.",
@@ -336,12 +454,21 @@ async function handleNominate(
     return;
   }
 
+  logEvent("info", "telegram.nomination.resolved", {
+    updateId: ctx.update.update_id,
+    groupChatId,
+    userId: ctx.from.id,
+    nomineeTelegramId: target.id,
+    nominationId: maskIdentifier(nomination.nominationId),
+    status: nomination.status,
+    created: nomination.created,
+    outcome: nomination.created ? "api_created" : "api_reused",
+  });
+
   if (nomination.status === "awaiting_claim") {
     await replyToGroupCommand(
       ctx,
-      nomination.created
-        ? `👋 ${targetMention}, you’ve been nominated as a NEAR Builder by ${invokerMention}!\n\nStart a private chat with me to continue.`
-        : `✅ ${targetMention} has already been nominated. Use the existing private-chat handoff below.`,
+      buildNominationMessage(targetMention, invokerMention),
       {
         parse_mode: "HTML",
         ...buildStartKeyboard(ctx, nomination.nominationId),
@@ -351,27 +478,44 @@ async function handleNominate(
     return;
   }
 
+  if (nomination.status === "awaiting_profile" && target.id === null) {
+    await replyToGroupCommand(
+      ctx,
+      buildNominationMessage(targetMention, invokerMention),
+      {
+        parse_mode: "HTML",
+        ...buildStartKeyboard(ctx, nomination.nominationId),
+      },
+    );
+    logEvent("info", "telegram.handoff.deep_link_fallback", {
+      updateId: ctx.update.update_id,
+      groupChatId,
+      userId: ctx.from.id,
+      nominationId: maskIdentifier(nomination.nominationId),
+      status: nomination.status,
+      created: nomination.created,
+      outcome: "username_only",
+      buttonType: "start_chat",
+    });
+    await reactCosmetically(ctx, "👀");
+    return;
+  }
+
   if (nomination.status === "awaiting_profile" && target.id !== null) {
     const delivery = await sendNomineeHandoff(
       ctx,
       { ...target, id: target.id },
       nomination,
+      invokerMention,
     );
     if (delivery === "sent") {
-      await replyToGroupCommand(
-        ctx,
-        nomination.created
-          ? `✅ ${targetMention} has been nominated by ${invokerMention}. I sent the onboarding link privately.`
-          : `✅ ${targetMention} was already nominated. I resent the existing onboarding link privately.`,
-        { parse_mode: "HTML" },
-      );
       await reactCosmetically(ctx, "👀");
       return;
     }
     if (delivery === "restricted") {
       await replyToGroupCommand(
         ctx,
-        `⚠️ ${targetMention} has been nominated, but must start a private chat before I can send the onboarding link.`,
+        `⚠️ ${targetMention} has been nominated, but I couldn't send them a DM. Please start a chat with me first by clicking the button below.`,
         {
           parse_mode: "HTML",
           ...buildStartKeyboard(ctx, nomination.nominationId),
@@ -388,6 +532,21 @@ async function handleNominate(
     return;
   }
 
+  if (nomination.status === "under_review") {
+    logEvent("info", "telegram.nomination.completed_reaction", {
+      updateId: ctx.update.update_id,
+      groupChatId,
+      userId: ctx.from.id,
+      nomineeTelegramId: target.id,
+      nominationId: maskIdentifier(nomination.nominationId),
+      status: nomination.status,
+      created: nomination.created,
+      outcome: "reaction_only",
+    });
+    await reactCosmetically(ctx, "🎉");
+    return;
+  }
+
   await replyToGroupCommand(
     ctx,
     lifecycleMessage(nomination.status, targetMention),
@@ -395,12 +554,28 @@ async function handleNominate(
       parse_mode: "HTML",
     },
   );
+  logEvent("info", "telegram.nomination.lifecycle_relayed", {
+    updateId: ctx.update.update_id,
+    groupChatId,
+    userId: ctx.from.id,
+    nomineeTelegramId: target.id,
+    nominationId: maskIdentifier(nomination.nominationId),
+    status: nomination.status,
+    created: nomination.created,
+    outcome: "group_response",
+  });
   if (nomination.status === "accepted") await reactCosmetically(ctx, "🎉");
 }
 
 async function handleDmMessage(ctx: Context): Promise<void> {
   if (!isPrivate(ctx) || !ctx.message || !("text" in ctx.message)) return;
   if (ctx.message.text.startsWith("/")) return;
+  logEvent("info", "telegram.private_text.redirected", {
+    updateId: ctx.update.update_id,
+    chatId: ctx.chat?.id,
+    userId: ctx.from?.id,
+    outcome: "website_onboarding",
+  });
   await ctx.reply(
     "Profile onboarding happens on the NEAR Builders website. Send /start to recover your nomination and secure link.",
   );
@@ -408,6 +583,12 @@ async function handleDmMessage(ctx: Context): Promise<void> {
 
 async function handleCallback(ctx: Context): Promise<void> {
   if (!ctx.callbackQuery || !("data" in ctx.callbackQuery)) return;
+  logEvent("info", "telegram.legacy_callback.received", {
+    updateId: ctx.update.update_id,
+    chatId: ctx.chat?.id,
+    userId: ctx.from?.id,
+    outcome: "migration_message",
+  });
   await acknowledgeCallbackQuery(() =>
     ctx.answerCbQuery(
       "This bot-side onboarding flow has retired. Send /start to recover your website handoff.",
@@ -422,7 +603,7 @@ export async function clearCommandMenus(bot: Telegraf): Promise<void> {
   await bot.telegram.setMyCommands([], {
     scope: { type: "all_private_chats" },
   });
-  logger.info("Bot command menus cleared");
+  logEvent("info", "bot.command_menus_cleared");
 }
 
 export function createBot(
@@ -435,24 +616,23 @@ export function createBot(
   bot.on(message("text"), handleDmMessage);
   bot.on("callback_query", handleCallback);
   bot.catch(async (error, ctx) => {
-    logger.error(
-      {
-        err: error,
-        updateId: ctx.update.update_id,
-        chatId: ctx.chat?.id,
-        userId: ctx.from?.id,
-      },
-      "Unhandled bot update error",
-    );
+    logEvent("error", "telegram.update.failed", {
+      err: error,
+      updateId: ctx.update.update_id,
+      chatId: ctx.chat?.id,
+      userId: ctx.from?.id,
+      outcome: "unhandled_error",
+    });
     try {
       await ctx.reply(
         "❌ Something went wrong while handling that request. Please try again shortly.",
       );
     } catch (replyError) {
-      logger.error(
-        { err: replyError, updateId: ctx.update.update_id },
-        "Could not send last-resort Telegram failure response",
-      );
+      logEvent("error", "telegram.failure_response.failed", {
+        err: replyError,
+        updateId: ctx.update.update_id,
+        outcome: "last_resort_reply_failed",
+      });
     }
   });
   return bot;

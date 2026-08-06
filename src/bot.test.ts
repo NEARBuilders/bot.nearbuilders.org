@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TelegramError } from "telegraf";
 import { clearCommandMenus, createBot, type BotDependencies } from "./bot.js";
-import type { Nomination } from "./nomination-api.js";
+import { NominationApiError, type Nomination } from "./nomination-api.js";
 
 const BOT_INFO = {
   id: 999,
@@ -180,6 +180,71 @@ test("command menus are cleared sequentially", async () => {
   assert.deepEqual(scopes, ["default", "all_group_chats", "all_private_chats"]);
 });
 
+test("un-nominated /start keeps the v1 response", async () => {
+  const nominations: BotDependencies["nominations"] = {
+    createNomination: async () => {
+      throw new Error("not used");
+    },
+    claimNomination: async () => {
+      throw new NominationApiError("not found", 404);
+    },
+  };
+  const { bot, calls } = setupBot(nominations);
+
+  await bot.handleUpdate(privateStart(45, 123, "Alice") as never);
+
+  assert.equal(
+    sentMessages(calls)[0]?.payload.text,
+    "👋 Welcome to the <b>NEAR Builders</b> onboarding bot!\n\n" +
+      "You will need to be nominated to enter the bot!",
+  );
+});
+
+test("invalid group nomination keeps the v1 response", async () => {
+  const nominations: BotDependencies["nominations"] = {
+    createNomination: async () => {
+      throw new Error("not used");
+    },
+    claimNomination: async () => {
+      throw new Error("not used");
+    },
+  };
+  const { bot, calls } = setupBot(nominations);
+
+  await bot.handleUpdate(groupCommand(46, "/onboard") as never);
+
+  assert.equal(
+    sentMessages(calls)[0]?.payload.text,
+    "⚠️ Use this command as a <b>reply</b> to someone, or with a username:\n" +
+      "<code>/onboard @username</code>",
+  );
+});
+
+test("bot targets keep the v1 rejection response", async () => {
+  let created = false;
+  const nominations: BotDependencies["nominations"] = {
+    createNomination: async () => {
+      created = true;
+      throw new Error("not used");
+    },
+    claimNomination: async () => {
+      throw new Error("not used");
+    },
+  };
+  const { bot, calls } = setupBot(nominations);
+
+  await bot.handleUpdate(
+    groupCommand(47, "/onboard", {
+      id: 999,
+      is_bot: true,
+      first_name: "Bot",
+    }) as never,
+  );
+
+  assert.equal(created, false);
+  assert.equal(sentMessages(calls)[0]?.payload.text, "🤖 You can't nominate a bot!");
+});
+
 test("username nominations stay provisional and use a nomination deep link", async () => {
   let createInput: unknown;
   const nominations: BotDependencies["nominations"] = {
@@ -212,12 +277,44 @@ test("username nominations stay provisional and use a nomination deep link", asy
     false,
   );
   const groupReply = sentMessages(calls)[0];
+  assert.equal(
+    groupReply?.payload.text,
+    "👋 @Alice, you've been nominated as a NEAR Builder by " +
+      '<a href="tg://user?id=456">Nominator</a>!\n\n' +
+      "To complete your profile, please start a chat with me first by clicking the button below.",
+  );
   const keyboard = groupReply?.payload.reply_markup as {
-    inline_keyboard: Array<Array<{ url: string }>>;
+    inline_keyboard: Array<Array<{ text: string; url: string }>>;
   };
   const startUrl = new URL(keyboard.inline_keyboard[0]?.[0]?.url ?? "");
   assert.equal(startUrl.hostname, "t.me");
   assert.equal(startUrl.searchParams.get("start"), "nom_pending");
+  assert.equal(keyboard.inline_keyboard[0]?.[0]?.text, "💬 Start Chat");
+});
+
+test("username nominations with an existing website handoff still provide a deep link", async () => {
+  const nominations: BotDependencies["nominations"] = {
+    createNomination: async () => ({
+      nominationId: "nom_profile",
+      status: "awaiting_profile",
+      joinUrl: "https://nearbuilders.org/join?nomination=existing",
+      created: false,
+    }),
+    claimNomination: async () => {
+      throw new Error("not used");
+    },
+  };
+  const { bot, calls } = setupBot(nominations);
+
+  await bot.handleUpdate(groupCommand(50, "/onboard @Alice") as never);
+
+  const groupReply = sentMessages(calls)[0];
+  assert.match(String(groupReply?.payload.text), /please start a chat with me/);
+  const keyboard = groupReply?.payload.reply_markup as {
+    inline_keyboard: Array<Array<{ url: string }>>;
+  };
+  const startUrl = new URL(keyboard.inline_keyboard[0]?.[0]?.url ?? "");
+  assert.equal(startUrl.searchParams.get("start"), "nom_profile");
 });
 
 test("reply nominations send the stable website URL directly", async () => {
@@ -269,12 +366,49 @@ test("reply nominations send the stable website URL directly", async () => {
     keyboard.inline_keyboard[0]?.[0]?.url,
     "https://nearbuilders.org/join?nomination=stable",
   );
-  assert.match(
-    String(
-      sentMessages(calls).find((call) => call.payload.chat_id === -100123)
-        ?.payload.text,
-    ),
-    /sent the onboarding link privately/,
+  assert.equal(
+    directMessage?.payload.text,
+    "🎉 You've been nominated as a NEAR Builder by " +
+      '<a href="tg://user?id=456">Nominator</a>!\n\n' +
+      "Complete your profile using the secure website link below.",
+  );
+  assert.equal(
+    sentMessages(calls).some((call) => call.payload.chat_id === -100123),
+    false,
+  );
+});
+
+test("reused direct nominations keep the v1 nominator message", async () => {
+  const nominations: BotDependencies["nominations"] = {
+    createNomination: async () => ({
+      nominationId: "nom_existing",
+      status: "awaiting_profile",
+      joinUrl: "https://nearbuilders.org/join?nomination=existing",
+      created: false,
+    }),
+    claimNomination: async () => {
+      throw new Error("not used");
+    },
+  };
+  const { bot, calls } = setupBot(nominations);
+
+  await bot.handleUpdate(
+    groupCommand(52, "/onboard", {
+      id: 123,
+      is_bot: false,
+      first_name: "Alice",
+      username: "alice",
+    }) as never,
+  );
+
+  const directMessage = sentMessages(calls).find(
+    (call) => call.payload.chat_id === 123,
+  );
+  assert.equal(
+    directMessage?.payload.text,
+    "🎉 You've been nominated as a NEAR Builder by " +
+      '<a href="tg://user?id=456">Nominator</a>!\n\n' +
+      "Complete your profile using the secure website link below.",
   );
 });
 
@@ -314,6 +448,11 @@ test("deep-link and plain start claims pass the verified Telegram identity", asy
   const direct = sentMessages(calls).find((call) =>
     String(call.payload.text).includes("secure NEAR Builders link"),
   );
+  assert.equal(
+    direct?.payload.text,
+    "✅ You've been nominated! Let's set up your builder profile.\n\n" +
+      "Complete your builder profile using the secure NEAR Builders link below.",
+  );
   const keyboard = direct?.payload.reply_markup as {
     inline_keyboard: Array<Array<{ url: string }>>;
   };
@@ -323,9 +462,90 @@ test("deep-link and plain start claims pass the verified Telegram identity", asy
   );
   assert.match(
     String(sentMessages(calls).at(-1)?.payload.text),
-    /under review/,
+    /already submitted your builder profile/,
   );
 });
+
+test("invalid start payloads are rejected before the API call", async () => {
+  let claimed = false;
+  const nominations: BotDependencies["nominations"] = {
+    createNomination: async () => {
+      throw new Error("not used");
+    },
+    claimNomination: async () => {
+      claimed = true;
+      throw new Error("not used");
+    },
+  };
+  const { bot, calls } = setupBot(nominations);
+
+  await bot.handleUpdate(
+    privateStart(63, 123, "Alice", "bad.payload") as never,
+  );
+
+  assert.equal(claimed, false);
+  assert.equal(
+    sentMessages(calls)[0]?.payload.text,
+    "⚠️ This nomination link is invalid. Ask for a new /onboard nomination.",
+  );
+});
+
+test("start rejects a nomination claimed by a different Telegram identity", async () => {
+  const nominations: BotDependencies["nominations"] = {
+    createNomination: async () => {
+      throw new Error("not used");
+    },
+    claimNomination: async () => {
+      throw new NominationApiError("identity mismatch", 403);
+    },
+  };
+  const { bot, calls } = setupBot(nominations);
+
+  await bot.handleUpdate(
+    privateStart(64, 123, "Alice", "nom_other") as never,
+  );
+
+  assert.equal(
+    sentMessages(calls)[0]?.payload.text,
+    "⚠️ This nomination does not match your Telegram account or current username. Ask for a new nomination.",
+  );
+});
+
+for (const [status, expectedText] of [
+  ["processing", "⏳ Your builder application is being processed."],
+  ["accepted", "🎉 You’ve been accepted as a NEAR Builder."],
+  [
+    "rejected",
+    "ℹ️ Your builder application was not accepted. Any new submission should use the website.",
+  ],
+  [
+    "removed",
+    "ℹ️ Your builder profile has been removed. Any new submission should use the website.",
+  ],
+  [
+    "processing_failed",
+    "⚠️ Your builder application could not be processed. An administrator can retry it.",
+  ],
+] as const) {
+  test(`/start relays the v2 ${status} lifecycle response`, async () => {
+    const nominations: BotDependencies["nominations"] = {
+      createNomination: async () => {
+        throw new Error("not used");
+      },
+      claimNomination: async () =>
+        ({
+          nominationId: `nom_${status}`,
+          status,
+          created: false,
+        }) as Nomination,
+    };
+    const { bot, calls } = setupBot(nominations);
+
+    await bot.handleUpdate(privateStart(62, 123, "Alice") as never);
+
+    assert.equal(sentMessages(calls)[0]?.payload.text, expectedText);
+  });
+}
 
 test("only expected direct-message restrictions receive the Start Chat fallback", async () => {
   const nomination = {
@@ -362,7 +582,7 @@ test("only expected direct-message restrictions receive the Start Chat fallback"
   );
   assert.match(
     String(expectedReply?.payload.text),
-    /must start a private chat/,
+    /couldn't send them a DM/,
   );
   assert.ok(expectedReply?.payload.reply_markup);
 
@@ -387,7 +607,7 @@ test("only expected direct-message restrictions receive the Start Chat fallback"
   assert.equal(unexpectedReply?.payload.reply_markup, undefined);
 });
 
-test("repeated nominations report authoritative lifecycle state without a handoff", async () => {
+test("under-review nominations preserve the v1 completed reaction behavior", async () => {
   const nominations: BotDependencies["nominations"] = {
     createNomination: async () => ({
       nominationId: "nom_review",
@@ -413,11 +633,17 @@ test("repeated nominations report authoritative lifecycle state without a handof
     sentMessages(calls).some((call) => call.payload.chat_id === 123),
     false,
   );
-  const groupReply = sentMessages(calls).find(
-    (call) => call.payload.chat_id === -100123,
+  assert.equal(
+    sentMessages(calls).some((call) => call.payload.chat_id === -100123),
+    false,
   );
-  assert.match(String(groupReply?.payload.text), /already under review/);
-  assert.equal(groupReply?.payload.reply_markup, undefined);
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.method === "setMessageReaction" &&
+        JSON.stringify(call.payload.reaction).includes("🎉"),
+    ),
+  );
 });
 
 test("API failures never produce a nomination success or direct message", async () => {

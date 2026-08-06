@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { logger } from "./logger.js";
+import { logEvent, maskIdentifier } from "./logger.js";
 
 export type NominationStatus =
   | "awaiting_claim"
@@ -152,7 +152,26 @@ async function requestNomination(
   fetcher: typeof fetch,
   idempotencyKey?: string,
 ): Promise<Nomination> {
+  const operation = "sourceNominationId" in input ? "create" : "claim";
+  const operationId =
+    "sourceNominationId" in input
+      ? maskIdentifier(input.sourceNominationId)
+      : maskIdentifier(input.nominationId);
+  const groupChatId =
+    "telegramGroupId" in input ? input.telegramGroupId : undefined;
+  const startedAt = Date.now();
+
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    const attemptNumber = attempt + 1;
+    logEvent("info", "nomination_api.request", {
+      operation,
+      operationId,
+      groupChatId,
+      attempt: attemptNumber,
+      endpointPath: endpoint.pathname,
+      idempotent: Boolean(idempotencyKey),
+    });
+
     let response: Response;
     try {
       response = await fetcher(endpoint, {
@@ -167,25 +186,72 @@ async function requestNomination(
       });
     } catch (error) {
       if (attempt === 0) {
-        logger.warn(
-          { err: error, endpoint: endpoint.pathname },
-          "Retrying nomination API request",
-        );
+        logEvent("warn", "nomination_api.retry", {
+          err: error,
+          operation,
+          operationId,
+          groupChatId,
+          attempt: attemptNumber,
+          reason: "network_error",
+          endpointPath: endpoint.pathname,
+          durationMs: Date.now() - startedAt,
+        });
         continue;
       }
+      logEvent("error", "nomination_api.failure", {
+        err: error,
+        operation,
+        operationId,
+        groupChatId,
+        attempt: attemptNumber,
+        outcome: "network_error",
+        endpointPath: endpoint.pathname,
+        durationMs: Date.now() - startedAt,
+      });
       throw new NominationApiError("Nomination API request failed", undefined, {
         cause: error,
       });
     }
 
+    const durationMs = Date.now() - startedAt;
+    logEvent(response.ok ? "info" : "warn", "nomination_api.response", {
+      operation,
+      operationId,
+      groupChatId,
+      attempt: attemptNumber,
+      httpStatus: response.status,
+      endpointPath: endpoint.pathname,
+      outcome: response.ok ? "success" : "http_error",
+      durationMs,
+    });
+
     if (!response.ok) {
       if (attempt === 0 && isRetryableStatus(response.status)) {
-        logger.warn(
-          { status: response.status, endpoint: endpoint.pathname },
-          "Retrying nomination API response",
-        );
+        logEvent("warn", "nomination_api.retry", {
+          operation,
+          operationId,
+          groupChatId,
+          attempt: attemptNumber,
+          reason: "retryable_http_status",
+          httpStatus: response.status,
+          endpointPath: endpoint.pathname,
+          durationMs,
+        });
         continue;
       }
+      const expectedStatus =
+        operation === "claim" &&
+        (response.status === 403 || response.status === 404);
+      logEvent(expectedStatus ? "warn" : "error", "nomination_api.failure", {
+        operation,
+        operationId,
+        groupChatId,
+        attempt: attemptNumber,
+        outcome: expectedStatus ? "expected_http_error" : "http_error",
+        httpStatus: response.status,
+        endpointPath: endpoint.pathname,
+        durationMs,
+      });
       throw new NominationApiError(
         `Nomination API returned HTTP ${response.status}`,
         response.status,
@@ -196,6 +262,17 @@ async function requestNomination(
     try {
       body = await response.json();
     } catch (error) {
+      logEvent("error", "nomination_api.malformed_response", {
+        err: error,
+        operation,
+        operationId,
+        groupChatId,
+        attempt: attemptNumber,
+        outcome: "invalid_json",
+        httpStatus: response.status,
+        endpointPath: endpoint.pathname,
+        durationMs: Date.now() - startedAt,
+      });
       throw new NominationApiError(
         "Nomination API returned invalid JSON",
         undefined,
@@ -204,9 +281,45 @@ async function requestNomination(
         },
       );
     }
-    return parseNomination(body, response.status === 201);
+
+    try {
+      const nomination = parseNomination(body, response.status === 201);
+      logEvent("info", "nomination_api.completed", {
+        operation,
+        operationId,
+        groupChatId,
+        attempt: attemptNumber,
+        nominationId: maskIdentifier(nomination.nominationId),
+        status: nomination.status,
+        created: nomination.created,
+        endpointPath: endpoint.pathname,
+        durationMs: Date.now() - startedAt,
+      });
+      return nomination;
+    } catch (error) {
+      logEvent("error", "nomination_api.malformed_response", {
+        err: error,
+        operation,
+        operationId,
+        groupChatId,
+        attempt: attemptNumber,
+        outcome: "malformed_response",
+        httpStatus: response.status,
+        endpointPath: endpoint.pathname,
+        durationMs: Date.now() - startedAt,
+      });
+      throw error;
+    }
   }
 
+  logEvent("error", "nomination_api.failure", {
+    operation,
+    operationId,
+    groupChatId,
+    outcome: "retry_exhausted",
+    endpointPath: endpoint.pathname,
+    durationMs: Date.now() - startedAt,
+  });
   throw new NominationApiError("Nomination API request failed");
 }
 
@@ -227,13 +340,12 @@ export async function createNomination(
 ): Promise<Nomination> {
   const { endpoint, apiKey, fetcher } = requestConfiguration(options, false);
   const idempotencyKey = `telegram-nomination:${input.sourceNominationId}`;
-  logger.info(
-    {
-      sourceNominationId: input.sourceNominationId,
-      nomineeTelegramId: input.nomineeTelegramId,
-    },
-    "Creating or resolving website nomination",
-  );
+  logEvent("info", "nomination_api.create_started", {
+    sourceNominationId: maskIdentifier(input.sourceNominationId),
+    nomineeTelegramId: input.nomineeTelegramId,
+    groupChatId: input.telegramGroupId,
+    endpointPath: endpoint.pathname,
+  });
   return await requestNomination(
     endpoint,
     input,
@@ -248,13 +360,11 @@ export async function claimNomination(
   options: RequestOptions = {},
 ): Promise<Nomination> {
   const { endpoint, apiKey, fetcher } = requestConfiguration(options, true);
-  logger.info(
-    {
-      nominationId: input.nominationId,
-      nomineeTelegramId: input.nomineeTelegramId,
-    },
-    "Claiming or recovering website nomination",
-  );
+  logEvent("info", "nomination_api.claim_started", {
+    nominationId: maskIdentifier(input.nominationId),
+    nomineeTelegramId: input.nomineeTelegramId,
+    endpointPath: endpoint.pathname,
+  });
   return await requestNomination(endpoint, input, apiKey, fetcher);
 }
 
