@@ -44,7 +44,7 @@ Create an app in X developer console, then create the following stream rule
 and Tag
 
 ```
-nearbuilders-x-bot-manual
+nearbuilders-x-bot
 ```
 
 ## Setup
