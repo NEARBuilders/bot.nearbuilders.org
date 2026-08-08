@@ -33,6 +33,20 @@ Admins contact the nominee from the existing NEAR Builders admin queue. The secu
 
 The bot uses the official [`@xdevplatform/xdk`](https://docs.x.com/tools/typescript-xdk) package for X user lookup, filtered-stream rules, and streaming.
 
+## X Developer Console
+
+Create an app in X developer console, then create the following stream rule 
+
+```
+@NEARBuilders onboard -is:retweet
+```
+
+and Tag
+
+```
+nearbuilders-x-bot-manual
+```
+
 ## Setup
 
 ```bash
