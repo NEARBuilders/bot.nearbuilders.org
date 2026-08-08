@@ -16,7 +16,7 @@ export interface StreamRunnerOptions {
 }
 
 export function buildStreamRule(botUsername: string): string {
-  return `@${botUsername} !onboard -is:retweet`;
+  return `@${botUsername} onboard -is:retweet`;
 }
 
 export async function ensureStreamRule(

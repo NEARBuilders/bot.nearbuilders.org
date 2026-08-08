@@ -6,7 +6,7 @@ The bot has no database, Redis instance, queue, or contributor state. The websit
 
 ## Behavior
 
-An approved community account publishes:
+A community member publishes:
 
 ```text
 @NEARBuilders !onboard @alice
@@ -22,13 +22,13 @@ The bot:
 4. Uses `x-nomination:<post-id>` as the idempotency key.
 5. Logs the result without posting a public reply.
 
-Admins contact the nominee from the existing NEAR Builders admin queue using the secure website link returned by the API.
+Admins contact the nominee from the existing NEAR Builders admin queue. The secure website link stays in the website and is never returned to the bot.
 
 ## Requirements
 
 - Node.js 20 or newer
 - An X app Bearer Token with Filtered Stream read access
-- A dedicated NEAR Builders API key
+- An existing NEAR Builders API key with generic API access
 - The X endpoint and database changes described in [`docs/nearbuilders-api-adaptation.md`](docs/nearbuilders-api-adaptation.md)
 
 The bot uses the official [`@xdevplatform/xdk`](https://docs.x.com/tools/typescript-xdk) package for X user lookup, filtered-stream rules, and streaming.
@@ -79,19 +79,18 @@ deployment is not marked active until the X filtered stream has connected.
 - X nominee lookups retry once for transient failures.
 - NEAR Builders API requests retry once for network errors, timeouts, 408, 429, and 5xx responses.
 - Every retry uses the same idempotency key.
-- HTTP 403 from the website API means the nominator is not approved and is not retried.
-- The bot never logs API keys, Bearer Tokens, or raw nomination tokens.
+- Non-retryable 4xx responses are reported as API failures and are not retried.
+- The bot never logs API keys or Bearer Tokens and never receives raw nomination tokens.
 
 The standard filtered stream is a persistent connection. If the process is down, posts published during the outage may not be replayed. The API remains idempotent, and Enterprise webhook delivery or API-owned recovery can be added later if guaranteed delivery is required.
 
 ## Deployment order
 
 1. Apply the website/API migration and deploy the X nomination endpoint.
-2. Create a dedicated API key for this bot and configure its allowed key ID in the website API.
-3. Add at least one approved X nominator in the website admin UI.
-4. Deploy this service with the X and NEAR Builders secrets.
-5. Verify `/health` and `/ready`.
-6. Publish a test nomination from an approved account.
-7. Confirm the admin queue, stable join link, idempotent replay, and profile attribution.
+2. Configure this service with an existing generic API key.
+3. Deploy this service with the X and NEAR Builders secrets.
+4. Verify `/health` and `/ready`.
+5. Publish and replay a test nomination.
+6. Confirm the admin queue, secure join link, idempotent replay, and profile attribution.
 
 See [`docs/nearbuilders-api-adaptation.md`](docs/nearbuilders-api-adaptation.md) for the website-side implementation checklist and smoke-test requests.

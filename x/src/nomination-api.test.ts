@@ -32,15 +32,7 @@ test("creates an X nomination with a stable idempotency key", async () => {
     requestUrl = String(input);
     requestInit = init;
     return Response.json(
-      {
-        nominationId: "nom_123",
-        source: "x",
-        engagementStatus: "pending_contact",
-        onboardingStatus: "awaiting_profile",
-        joinUrl: "https://nearbuilders.org/join?nomination=opaque-token",
-        proposalId: null,
-        proposalEntityId: null,
-      },
+      { nominationId: "nom_123" },
       { status: 201 },
     );
   };
@@ -58,12 +50,6 @@ test("creates an X nomination with a stable idempotency key", async () => {
   assert.deepEqual(JSON.parse(String(requestInit?.body)), INPUT);
   assert.deepEqual(result, {
     nominationId: "nom_123",
-    source: "x",
-    engagementStatus: "pending_contact",
-    onboardingStatus: "awaiting_profile",
-    joinUrl: "https://nearbuilders.org/join?nomination=opaque-token",
-    proposalId: null,
-    proposalEntityId: null,
     created: true,
   });
 });
@@ -75,14 +61,7 @@ test("retries one network failure without changing idempotency", async () => {
     calls += 1;
     keys.push(new Headers(init?.headers).get("idempotency-key"));
     if (calls === 1) throw new TypeError("network unavailable");
-    return Response.json({
-      nominationId: "nom_retry",
-      source: "x",
-      engagementStatus: "pending_contact",
-      onboardingStatus: "awaiting_profile",
-      proposalId: null,
-      proposalEntityId: null,
-    });
+    return Response.json({ nominationId: "nom_retry" });
   };
 
   const result = await createNomination(INPUT, {
@@ -94,11 +73,11 @@ test("retries one network failure without changing idempotency", async () => {
   assert.deepEqual(keys, ["x-nomination:123456789", "x-nomination:123456789"]);
 });
 
-test("does not retry an unapproved nominator response", async () => {
+test("does not retry a client error", async () => {
   let calls = 0;
   const fetchMock: typeof fetch = async () => {
     calls += 1;
-    return new Response("unapproved", { status: 403 });
+    return new Response("forbidden", { status: 403 });
   };
 
   await assert.rejects(
@@ -108,20 +87,11 @@ test("does not retry an unapproved nominator response", async () => {
   assert.equal(calls, 1);
 });
 
-test("rejects insecure join URLs", async () => {
-  const fetchMock: typeof fetch = async () =>
-    Response.json({
-      nominationId: "nom_bad",
-      source: "x",
-      engagementStatus: "pending_contact",
-      onboardingStatus: "awaiting_profile",
-      joinUrl: "http://attacker.example/join?nomination=leak",
-      proposalId: null,
-      proposalEntityId: null,
-    });
+test("rejects malformed receipts", async () => {
+  const fetchMock: typeof fetch = async () => Response.json({ created: true });
 
   await assert.rejects(
     createNomination(INPUT, { ...OPTIONS, fetch: fetchMock }),
-    /joinUrl must use HTTPS/,
+    /malformed response/,
   );
 });

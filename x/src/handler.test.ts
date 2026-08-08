@@ -4,10 +4,7 @@ import {
   handlePostEvent,
   extractPostEvent,
 } from "./handler.js";
-import {
-  NominationApiError,
-  type XNomination,
-} from "./nomination-api.js";
+import type { XNomination } from "./nomination-api.js";
 
 const event = {
   data: {
@@ -28,12 +25,6 @@ const event = {
 function nomination(created: boolean): XNomination {
   return {
     nominationId: "nom_123",
-    source: "x",
-    engagementStatus: "pending_contact",
-    onboardingStatus: "awaiting_profile",
-    joinUrl: "https://nearbuilders.org/join?nomination=token",
-    proposalId: null,
-    proposalEntityId: null,
     created,
   };
 }
@@ -97,7 +88,7 @@ test("does not create a nomination for an unavailable nominee", async () => {
   assert.equal(calls, 0);
 });
 
-test("silently handles API rejection for an unapproved nominator", async () => {
+test("reports an API persistence failure separately from lookup failures", async () => {
   const result = await handlePostEvent(event, {
     botUsername: "nearbuilders",
     x: {
@@ -105,11 +96,11 @@ test("silently handles API rejection for an unapproved nominator", async () => {
     },
     nominations: {
       createNomination: async () => {
-        throw new NominationApiError("unapproved", 403);
+        throw new Error("API unavailable");
       },
     },
   });
-  assert.equal(result, "unapproved");
+  assert.equal(result, "api_failed");
 });
 
 test("ignores malformed and implicit events", async () => {

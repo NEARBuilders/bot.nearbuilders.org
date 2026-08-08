@@ -1,21 +1,5 @@
 import { logger } from "./logger.js";
 
-export type EngagementStatus =
-  | "pending_contact"
-  | "contacted"
-  | "snoozed"
-  | "rejected"
-  | "completed";
-
-export type OnboardingStatus =
-  | "awaiting_profile"
-  | "under_review"
-  | "processing"
-  | "accepted"
-  | "rejected"
-  | "removed"
-  | "processing_failed";
-
 export interface CreateXNominationRequest {
   source: "x";
   sourceNominationId: string;
@@ -24,7 +8,7 @@ export interface CreateXNominationRequest {
   sourcePostCreatedAt: string | null;
   nominatedByXId: string;
   nominatedByXUsername: string;
-  nomineeXId: string | null;
+  nomineeXId: string;
   nomineeXUsername: string;
   conversationId: string | null;
   replyToPostId: string | null;
@@ -32,12 +16,6 @@ export interface CreateXNominationRequest {
 
 export interface XNomination {
   nominationId: string;
-  source: "x";
-  engagementStatus: EngagementStatus | null;
-  onboardingStatus: OnboardingStatus | null;
-  joinUrl?: string;
-  proposalId: string | null;
-  proposalEntityId: string | null;
   created: boolean;
 }
 
@@ -54,24 +32,6 @@ const LOOPBACK_HOSTNAMES = new Set([
   "[::1]",
 ]);
 
-const ENGAGEMENT_STATUSES = new Set<EngagementStatus>([
-  "pending_contact",
-  "contacted",
-  "snoozed",
-  "rejected",
-  "completed",
-]);
-
-const ONBOARDING_STATUSES = new Set<OnboardingStatus>([
-  "awaiting_profile",
-  "under_review",
-  "processing",
-  "accepted",
-  "rejected",
-  "removed",
-  "processing_failed",
-]);
-
 export class NominationApiError extends Error {
   constructor(
     message: string,
@@ -83,10 +43,6 @@ export class NominationApiError extends Error {
   }
 }
 
-function usesSecureOrLoopbackUrl(url: URL): boolean {
-  return url.protocol === "https:" || LOOPBACK_HOSTNAMES.has(url.hostname);
-}
-
 function endpointUrl(apiUrl: string): URL {
   let endpoint: URL;
   try {
@@ -94,10 +50,8 @@ function endpointUrl(apiUrl: string): URL {
   } catch {
     throw new NominationApiError("NEARBUILDERS_NOMINATION_URL is invalid");
   }
-  if (!usesSecureOrLoopbackUrl(endpoint)) {
-    throw new NominationApiError(
-      "NEARBUILDERS_NOMINATION_URL must use HTTPS",
-    );
+  if (endpoint.protocol !== "https:" && !LOOPBACK_HOSTNAMES.has(endpoint.hostname)) {
+    throw new NominationApiError("NEARBUILDERS_NOMINATION_URL must use HTTPS");
   }
   return endpoint;
 }
@@ -106,71 +60,17 @@ function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function optionalString(value: Record<string, unknown>, key: string): string | null {
-  const candidate = value[key];
-  return candidate === undefined || candidate === null ? null :
-    typeof candidate === "string" ? candidate : null;
-}
-
 function parseNomination(value: unknown, created: boolean): XNomination {
-  if (!isObject(value) || typeof value.nominationId !== "string" || !value.nominationId) {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("nominationId" in value) ||
+    typeof value.nominationId !== "string" ||
+    !value.nominationId
+  ) {
     throw new NominationApiError("Nomination API returned a malformed response");
   }
-  if (value.source !== undefined && value.source !== "x") {
-    throw new NominationApiError("Nomination API returned the wrong nomination source");
-  }
-
-  const engagementValue = value.engagementStatus;
-  if (engagementValue !== undefined &&
-      (typeof engagementValue !== "string" ||
-        !ENGAGEMENT_STATUSES.has(engagementValue as EngagementStatus))) {
-    throw new NominationApiError("Nomination API returned an invalid engagement status");
-  }
-
-  const onboardingValue = value.onboardingStatus ?? value.status;
-  if (onboardingValue !== undefined && onboardingValue !== null &&
-      (typeof onboardingValue !== "string" ||
-        !ONBOARDING_STATUSES.has(onboardingValue as OnboardingStatus))) {
-    throw new NominationApiError("Nomination API returned an invalid onboarding status");
-  }
-
-  const joinUrlValue = value.joinUrl;
-  let joinUrl: string | undefined;
-  if (joinUrlValue !== undefined && joinUrlValue !== null) {
-    if (typeof joinUrlValue !== "string") {
-      throw new NominationApiError("Nomination API returned an invalid joinUrl");
-    }
-    let parsedJoinUrl: URL;
-    try {
-      parsedJoinUrl = new URL(joinUrlValue);
-    } catch {
-      throw new NominationApiError("Nomination API returned an invalid joinUrl");
-    }
-    if (!usesSecureOrLoopbackUrl(parsedJoinUrl)) {
-      throw new NominationApiError("Nomination API joinUrl must use HTTPS");
-    }
-    joinUrl = parsedJoinUrl.toString();
-  }
-
-  const proposalId = optionalString(value, "proposalId");
-  const proposalEntityId = optionalString(value, "proposalEntityId");
-  return {
-    nominationId: value.nominationId,
-    source: "x",
-    engagementStatus: (engagementValue as EngagementStatus | undefined) ?? null,
-    onboardingStatus:
-      onboardingValue === undefined || onboardingValue === null
-        ? null
-        : (onboardingValue as OnboardingStatus),
-    ...(joinUrl ? { joinUrl } : {}),
-    proposalId,
-    proposalEntityId,
-    created,
-  };
+  return { nominationId: value.nominationId, created };
 }
 
 function requestConfiguration(options: RequestOptions) {
@@ -246,7 +146,6 @@ async function requestNomination(
     }
     return parseNomination(body, response.status === 201);
   }
-
   throw new NominationApiError("Nomination API request failed");
 }
 
@@ -266,6 +165,4 @@ export async function createNomination(
   return await requestNomination(endpoint, input, apiKey, fetcher);
 }
 
-export const nominationApi = {
-  createNomination,
-};
+export const nominationApi = { createNomination };

@@ -1,7 +1,6 @@
 import { logger } from "./logger.js";
 import {
   createNomination,
-  NominationApiError,
   type CreateXNominationRequest,
   type XNomination,
 } from "./nomination-api.js";
@@ -35,8 +34,8 @@ export type HandlePostResult =
   | "ignored"
   | "created"
   | "replayed"
-  | "unapproved"
-  | "lookup_failed";
+  | "lookup_failed"
+  | "api_failed";
 
 function asRecord(value: unknown): RecordValue | null {
   return typeof value === "object" && value !== null
@@ -159,7 +158,10 @@ export async function handlePostEvent(
     );
     return "ignored";
   }
-  if (nominee.id === post.authorId || nominee.username.toLowerCase() === post.authorUsername.toLowerCase()) {
+  if (
+    nominee.id === post.authorId ||
+    nominee.username.toLowerCase() === post.authorUsername.toLowerCase()
+  ) {
     logger.info({ postId: post.id, nomineeXId: nominee.id }, "Ignored X self-nomination");
     return "ignored";
   }
@@ -170,12 +172,8 @@ export async function handlePostEvent(
       createRequest(post, nominee, command),
     );
   } catch (error) {
-    if (error instanceof NominationApiError && error.status === 403) {
-      logger.info({ postId: post.id, nominatedByXId: post.authorId }, "Ignored unapproved X nominator");
-      return "unapproved";
-    }
     logger.error({ err: error, postId: post.id }, "Could not persist X nomination");
-    return "lookup_failed";
+    return "api_failed";
   }
 
   logger.info(
