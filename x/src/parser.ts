@@ -35,6 +35,20 @@ export function parseNominationCommand(
   };
 }
 
+export function isReplyNominationCommand(
+  text: string,
+  botUsername: string,
+): boolean {
+  const normalizedBotUsername = normalizeXUsername(botUsername);
+  if (!X_USERNAME_PATTERN.test(normalizedBotUsername)) return false;
+
+  const pattern = new RegExp(
+    `^\\s*@${escapeRegExp(normalizedBotUsername)}(?![A-Za-z0-9_])\\s+!onboard(?![A-Za-z0-9_])\\s*$`,
+    "i",
+  );
+  return pattern.test(text);
+}
+
 export function buildSourcePostUrl(postId: string): string {
   return `https://x.com/i/web/status/${encodeURIComponent(postId)}`;
 }

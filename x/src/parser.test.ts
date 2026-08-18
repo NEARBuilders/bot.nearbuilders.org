@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildSourcePostUrl,
+  isReplyNominationCommand,
   normalizeXUsername,
   parseNominationCommand,
 } from "./parser.js";
@@ -20,11 +21,26 @@ test("normalizes handles without changing displayed input", () => {
   assert.equal(normalizeXUsername(" @Alice "), "alice");
 });
 
-test("rejects implicit reply nominations and ambiguous commands", () => {
+test("rejects shorthand in the explicit nomination parser and ambiguous commands", () => {
   assert.equal(parseNominationCommand("@NEARBuilders !onboard", "NEARBuilders"), null);
   assert.equal(
     parseNominationCommand("@NEARBuilders !onboard @alice and @NEARBuilders !onboard @bob", "NEARBuilders"),
     null,
+  );
+});
+
+test("accepts only the exact reply nomination shorthand", () => {
+  assert.equal(
+    isReplyNominationCommand("  @NEARBuilders !onboard\n", "nearbuilders"),
+    true,
+  );
+  assert.equal(
+    isReplyNominationCommand("please @NEARBuilders !onboard", "nearbuilders"),
+    false,
+  );
+  assert.equal(
+    isReplyNominationCommand("@NEARBuilders !onboard @alice", "nearbuilders"),
+    false,
   );
 });
 

@@ -12,15 +12,24 @@ A community member publishes:
 @NEARBuilders !onboard @alice
 ```
 
-The post author is recorded as the nominator. The explicit `@alice` handle is recorded as the nominee. Reply context is preserved as metadata but is not used to infer the nominee.
+The post author is recorded as the nominator. In this explicit form, the `@alice` handle is recorded as the nominee and any reply context is preserved only as metadata.
+
+As a shorthand, a community member can reply directly to another user's post with exactly:
+
+```text
+@NearBuilders !onboard
+```
+
+For this reply-only form, the author of the replied-to post is the nominee. The shorthand is ignored when it is not a reply or when extra text is present.
 
 The bot:
 
 1. Receives matching posts through X Filtered Stream.
-2. Resolves the nominee handle to a stable X user ID.
+2. Resolves the nominee to a stable X user ID.
 3. Sends the original post, nominator, nominee, and reply metadata to the NEAR Builders API.
 4. Uses `x-nomination:<post-id>` as the idempotency key.
-5. Logs the result without posting a public reply.
+5. Likes the nomination post after the API confirms a new or replayed nomination.
+6. Logs the result without posting a public reply.
 
 Admins contact the nominee from the existing NEAR Builders admin queue. The secure website link stays in the website and is never returned to the bot.
 
@@ -28,6 +37,7 @@ Admins contact the nominee from the existing NEAR Builders admin queue. The secu
 
 - Node.js 20 or newer
 - An X app Bearer Token with Filtered Stream read access
+- OAuth 1.0a user credentials for the `@NearBuilders` account with read and write access
 - An existing NEAR Builders API key with generic API access
 - The X endpoint and database changes described in [`docs/nearbuilders-api-adaptation.md`](docs/nearbuilders-api-adaptation.md)
 
@@ -59,6 +69,10 @@ Configure `.env`:
 
 ```env
 X_BEARER_TOKEN=your_x_app_bearer_token
+X_CONSUMER_KEY=your_x_app_consumer_key
+X_CONSUMER_KEY_SECRET=your_x_app_consumer_key_secret
+X_ACCESS_TOKEN=your_nearbuilders_user_access_token
+X_ACCESS_TOKEN_SECRET=your_nearbuilders_user_access_token_secret
 X_BOT_USERNAME=NEARBuilders
 NEARBUILDERS_NOMINATION_URL=https://nearbuilders.org/api/builders/nominations/x
 NEARBUILDERS_API_KEY=your_nearbuilders_api_key
@@ -68,6 +82,8 @@ LOG_LEVEL=info
 ```
 
 `X_BOT_USERNAME` may include or omit `@`. Non-loopback NEAR Builders URLs must use HTTPS.
+
+The access token must belong to the bot account because its authenticated user ID is used when liking nomination posts. The bot verifies that the token's username matches `X_BOT_USERNAME` before its first like. If the X app was changed from read-only to read/write, regenerate the access token and secret afterward.
 
 ## Commands
 
@@ -91,10 +107,12 @@ deployment is not marked active until the X filtered stream has connected.
 
 - Stream connections reconnect with exponential backoff.
 - X nominee lookups retry once for transient failures.
+- Replied-to post lookups and likes retry once for transient failures.
 - NEAR Builders API requests retry once for network errors, timeouts, 408, 429, and 5xx responses.
 - Every retry uses the same idempotency key.
 - Non-retryable 4xx responses are reported as API failures and are not retried.
-- The bot never logs API keys or Bearer Tokens and never receives raw nomination tokens.
+- A failed like is logged without changing a successfully persisted nomination result.
+- The bot never logs X credentials, API keys, or Bearer Tokens and never receives raw nomination tokens.
 
 The standard filtered stream is a persistent connection. If the process is down, posts published during the outage may not be replayed. The API remains idempotent, and Enterprise webhook delivery or API-owned recovery can be added later if guaranteed delivery is required.
 

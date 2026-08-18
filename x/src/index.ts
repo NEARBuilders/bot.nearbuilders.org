@@ -13,7 +13,14 @@ async function closeServer(server: { close(callback: (error?: Error) => void): v
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const x = createXApi(config.xBearerToken);
+  const x = createXApi({
+    bearerToken: config.xBearerToken,
+    consumerKey: config.xConsumerKey,
+    consumerKeySecret: config.xConsumerKeySecret,
+    accessToken: config.xAccessToken,
+    accessTokenSecret: config.xAccessTokenSecret,
+    botUsername: config.xBotUsername,
+  });
   const state: HealthState = { connected: false };
   const healthServer = await startHealthServer(config.port, state);
   const controller = new AbortController();

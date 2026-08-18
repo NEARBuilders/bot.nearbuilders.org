@@ -10,7 +10,7 @@ import { XApiError, type XApi, type XRule, type XStream } from "./x-api.js";
 test("builds the filtered-stream rule", () => {
   assert.equal(
     buildStreamRule("nearbuilders"),
-    "@nearbuilders !onboard -is:retweet",
+    "@nearbuilders onboard -is:retweet",
   );
 });
 
@@ -18,7 +18,7 @@ test("reconciles only rules owned by this bot", async () => {
   const rules: XRule[] = [
     { id: "keep", value: "#near", tag: "other-app" },
     { id: "stale", value: "@nearbuilders !onboard", tag: "nearbuilders-x-bot" },
-    { id: "duplicate", value: "@nearbuilders !onboard -is:retweet", tag: "nearbuilders-x-bot" },
+    { id: "duplicate", value: "@nearbuilders onboard -is:retweet", tag: "nearbuilders-x-bot" },
   ];
   const deleted: string[][] = [];
   const added: Array<{ value: string; tag: string }> = [];
@@ -33,7 +33,7 @@ test("reconciles only rules owned by this bot", async () => {
         added.push({ value, tag });
       },
     },
-    "@nearbuilders !onboard -is:retweet",
+    "@nearbuilders onboard -is:retweet",
     "nearbuilders-x-bot",
   );
 
@@ -52,11 +52,11 @@ test("adds the rule when no owned rule exists", async () => {
         added.push({ value, tag });
       },
     },
-    "@nearbuilders !onboard -is:retweet",
+    "@nearbuilders onboard -is:retweet",
     "nearbuilders-x-bot",
   );
   assert.deepEqual(added, [
-    { value: "@nearbuilders !onboard -is:retweet", tag: "nearbuilders-x-bot" },
+    { value: "@nearbuilders onboard -is:retweet", tag: "nearbuilders-x-bot" },
   ]);
 });
 
@@ -75,6 +75,8 @@ function streamClient(
 ): XApi {
   return {
     getUserByUsername: async () => null,
+    getPostAuthor: async () => null,
+    likePost: async () => undefined,
     getStreamRules,
     addStreamRule: async () => undefined,
     deleteStreamRules: async () => undefined,

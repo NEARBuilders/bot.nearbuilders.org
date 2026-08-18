@@ -6,6 +6,7 @@ import {
 } from "./nomination-api.js";
 import {
   buildSourcePostUrl,
+  isReplyNominationCommand,
   parseNominationCommand,
 } from "./parser.js";
 import { XApiError, type XApi, type XUser } from "./x-api.js";
@@ -26,7 +27,7 @@ export interface XPost {
 
 export interface HandlePostDependencies {
   botUsername: string;
-  x: Pick<XApi, "getUserByUsername">;
+  x: Pick<XApi, "getUserByUsername" | "getPostAuthor" | "likePost">;
   nominations: Pick<typeof import("./nomination-api.js"), "createNomination">;
 }
 
@@ -108,10 +109,28 @@ async function resolveNominee(
   return null;
 }
 
+async function resolveReplyNominee(
+  x: Pick<XApi, "getPostAuthor">,
+  postId: string,
+): Promise<XUser | null> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await x.getPostAuthor(postId);
+    } catch (error) {
+      if (error instanceof XApiError && error.status === 404) return null;
+      if (attempt === 0 && isRetryableXError(error)) {
+        logger.warn({ err: error, postId }, "Retrying replied-to X post lookup");
+        continue;
+      }
+      throw error;
+    }
+  }
+  return null;
+}
+
 function createRequest(
   post: XPost,
   nominee: XUser,
-  command: NonNullable<ReturnType<typeof parseNominationCommand>>,
 ): CreateXNominationRequest {
   if (!post.authorUsername) {
     throw new Error("Stream event did not include the nominator username");
@@ -125,10 +144,28 @@ function createRequest(
     nominatedByXId: post.authorId,
     nominatedByXUsername: post.authorUsername,
     nomineeXId: nominee.id,
-    nomineeXUsername: nominee.username || command.nomineeUsername,
+    nomineeXUsername: nominee.username,
     conversationId: post.conversationId,
     replyToPostId: post.replyToPostId,
   };
+}
+
+async function likeNominationPost(
+  x: Pick<XApi, "likePost">,
+  postId: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await x.likePost(postId);
+      return;
+    } catch (error) {
+      if (attempt === 0 && isRetryableXError(error)) {
+        logger.warn({ err: error, postId }, "Retrying X nomination like");
+        continue;
+      }
+      throw error;
+    }
+  }
 }
 
 export async function handlePostEvent(
@@ -139,21 +176,36 @@ export async function handlePostEvent(
   if (!post || !post.authorUsername) return "ignored";
 
   const command = parseNominationCommand(post.text, dependencies.botUsername);
-  if (!command) return "ignored";
+  const isReplyCommand = isReplyNominationCommand(post.text, dependencies.botUsername);
+  if (!command && !isReplyCommand) return "ignored";
 
   let nominee: XUser | null;
   try {
-    nominee = await resolveNominee(dependencies.x, command.nomineeUsername);
+    if (command) {
+      nominee = await resolveNominee(dependencies.x, command.nomineeUsername);
+    } else {
+      if (!post.replyToPostId) return "ignored";
+      nominee = await resolveReplyNominee(dependencies.x, post.replyToPostId);
+    }
   } catch (error) {
     logger.error(
-      { err: error, postId: post.id, nomineeUsername: command.nomineeUsername },
+      {
+        err: error,
+        postId: post.id,
+        nomineeUsername: command?.nomineeUsername,
+        replyToPostId: command ? undefined : post.replyToPostId,
+      },
       "Could not resolve X nominee",
     );
     return "lookup_failed";
   }
   if (!nominee) {
     logger.info(
-      { postId: post.id, nomineeUsername: command.nomineeUsername },
+      {
+        postId: post.id,
+        nomineeUsername: command?.nomineeUsername,
+        replyToPostId: command ? undefined : post.replyToPostId,
+      },
       "Ignored nomination for an unavailable X user",
     );
     return "ignored";
@@ -169,7 +221,7 @@ export async function handlePostEvent(
   let nomination: XNomination;
   try {
     nomination = await dependencies.nominations.createNomination(
-      createRequest(post, nominee, command),
+      createRequest(post, nominee),
     );
   } catch (error) {
     logger.error({ err: error, postId: post.id }, "Could not persist X nomination");
@@ -184,6 +236,16 @@ export async function handlePostEvent(
     },
     nomination.created ? "Recorded X nomination" : "Replayed X nomination",
   );
+
+  try {
+    await likeNominationPost(dependencies.x, post.id);
+  } catch (error) {
+    logger.error(
+      { err: error, postId: post.id, nominationId: nomination.nominationId },
+      "Could not like X nomination post",
+    );
+  }
+
   return nomination.created ? "created" : "replayed";
 }
 

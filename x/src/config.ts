@@ -2,6 +2,10 @@ import "dotenv/config";
 
 export interface Config {
   xBearerToken: string;
+  xConsumerKey: string;
+  xConsumerKeySecret: string;
+  xAccessToken: string;
+  xAccessTokenSecret: string;
   xBotUsername: string;
   nearBuildersNominationUrl: string;
   nearBuildersApiKey: string;
@@ -42,6 +46,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     xBearerToken: requiredString(env.X_BEARER_TOKEN, "X_BEARER_TOKEN"),
+    xConsumerKey: requiredString(env.X_CONSUMER_KEY, "X_CONSUMER_KEY"),
+    xConsumerKeySecret: requiredString(
+      env.X_CONSUMER_KEY_SECRET,
+      "X_CONSUMER_KEY_SECRET",
+    ),
+    xAccessToken: requiredString(env.X_ACCESS_TOKEN, "X_ACCESS_TOKEN"),
+    xAccessTokenSecret: requiredString(env.X_ACCESS_TOKEN_SECRET, "X_ACCESS_TOKEN_SECRET"),
     xBotUsername,
     nearBuildersNominationUrl: parsedNominationUrl.toString(),
     nearBuildersApiKey: requiredString(env.NEARBUILDERS_API_KEY, "NEARBUILDERS_API_KEY"),

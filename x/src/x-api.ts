@@ -1,4 +1,4 @@
-import { Client } from "@xdevplatform/xdk";
+import { Client, OAuth1 } from "@xdevplatform/xdk";
 
 export interface XdkClientLike {
   users: {
@@ -6,6 +6,17 @@ export interface XdkClientLike {
       username: string,
       options: { userFields: string[] },
     ): Promise<{ data?: unknown }>;
+    getMe(options: { userFields: string[] }): Promise<{ data?: unknown }>;
+    likePost(
+      id: string,
+      body: { tweetId: string },
+    ): Promise<{ data?: { liked?: unknown } }>;
+  };
+  posts: {
+    getById(
+      id: string,
+      options: { expansions: string[]; userFields: string[] },
+    ): Promise<{ data?: unknown; includes?: { users?: unknown[] } }>;
   };
   stream: {
     getRules(options?: {
@@ -42,10 +53,21 @@ export interface XStream extends AsyncIterable<unknown> {
 
 export interface XApi {
   getUserByUsername(username: string): Promise<XUser | null>;
+  getPostAuthor(postId: string): Promise<XUser | null>;
+  likePost(postId: string): Promise<void>;
   getStreamRules(): Promise<XRule[]>;
   addStreamRule(value: string, tag: string): Promise<void>;
   deleteStreamRules(ids: string[]): Promise<void>;
   streamPosts(): Promise<XStream>;
+}
+
+export interface XApiCredentials {
+  bearerToken: string;
+  consumerKey: string;
+  consumerKeySecret: string;
+  accessToken: string;
+  accessTokenSecret: string;
+  botUsername: string;
 }
 
 export class XApiError extends Error {
@@ -82,10 +104,66 @@ function readUser(value: unknown): XUser | null {
   };
 }
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readPostAuthor(response: {
+  data?: unknown;
+  includes?: { users?: unknown[] };
+}): XUser | null {
+  const data = recordValue(response.data);
+  const authorId = data?.authorId ?? data?.author_id;
+  if (typeof authorId !== "string") return null;
+
+  for (const candidate of response.includes?.users ?? []) {
+    const user = readUser(candidate);
+    if (user?.id === authorId) return user;
+  }
+  return null;
+}
+
 export function createXApi(
-  bearerToken: string,
-  client: XdkClientLike = new Client({ bearerToken }) as unknown as XdkClientLike,
+  credentials: XApiCredentials,
+  client: XdkClientLike = new Client({
+    bearerToken: credentials.bearerToken,
+    oauth1: new OAuth1({
+      apiKey: credentials.consumerKey,
+      apiSecret: credentials.consumerKeySecret,
+      accessToken: credentials.accessToken,
+      accessTokenSecret: credentials.accessTokenSecret,
+      callback: "oob",
+    }),
+  }) as unknown as XdkClientLike,
 ): XApi {
+  let authenticatedUserId: string | undefined;
+
+  const getAuthenticatedUserId = async (): Promise<string> => {
+    if (authenticatedUserId) return authenticatedUserId;
+    try {
+      const response = await client.users.getMe({
+        userFields: ["id", "username", "name"],
+      });
+      const user = readUser(response.data);
+      if (!user) throw new Error("X authenticated user response was incomplete");
+      const expectedUsername = credentials.botUsername.replace(/^@/, "").toLowerCase();
+      if (user.username.toLowerCase() !== expectedUsername) {
+        throw new XApiError(
+          `X access token belongs to @${user.username}, expected @${expectedUsername}`,
+          403,
+        );
+      }
+      authenticatedUserId = user.id;
+      return authenticatedUserId;
+    } catch (error) {
+      if (error instanceof XApiError) throw error;
+      throw new XApiError("X authenticated user lookup failed", errorStatus(error), {
+        cause: error,
+      });
+    }
+  };
 
   return {
     async getUserByUsername(username) {
@@ -96,6 +174,35 @@ export function createXApi(
         return readUser(response.data);
       } catch (error) {
         throw new XApiError("X user lookup failed", errorStatus(error), {
+          cause: error,
+        });
+      }
+    },
+
+    async getPostAuthor(postId) {
+      try {
+        const response = await client.posts.getById(postId, {
+          expansions: ["author_id"],
+          userFields: ["id", "username", "name"],
+        });
+        return readPostAuthor(response);
+      } catch (error) {
+        throw new XApiError("X post author lookup failed", errorStatus(error), {
+          cause: error,
+        });
+      }
+    },
+
+    async likePost(postId) {
+      try {
+        const userId = await getAuthenticatedUserId();
+        const response = await client.users.likePost(userId, { tweetId: postId });
+        if (response.data?.liked !== true) {
+          throw new Error("X like response did not confirm the like");
+        }
+      } catch (error) {
+        if (error instanceof XApiError) throw error;
+        throw new XApiError("X post like failed", errorStatus(error), {
           cause: error,
         });
       }
