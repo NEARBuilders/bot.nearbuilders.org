@@ -15,13 +15,13 @@ export interface TelegramLinkInput {
 export interface TelegramLinkResult {
   url: string;
   expiresAt: string;
-  linkedAs: string | null;
+  alreadyLinked: boolean;
 }
 
 interface LinkResponse {
   path: string;
   expiresAt: string;
-  linkedAs: string | null;
+  alreadyLinked: boolean;
 }
 
 function isLinkResponse(value: unknown): value is LinkResponse {
@@ -31,7 +31,7 @@ function isLinkResponse(value: unknown): value is LinkResponse {
     typeof record.path === "string" &&
     record.path.startsWith("/") &&
     typeof record.expiresAt === "string" &&
-    (record.linkedAs === null || typeof record.linkedAs === "string")
+    typeof record.alreadyLinked === "boolean"
   );
 }
 
@@ -54,10 +54,10 @@ export async function requestTelegramLink(
   if (url.origin !== site.origin) {
     throw new ReviewDecisionError("The website returned a malformed response");
   }
-  logEvent("info", "telegram_link.created", { alreadyLinked: Boolean(response.linkedAs) });
+  logEvent("info", "telegram_link.created", { alreadyLinked: response.alreadyLinked });
   return {
     url: url.toString(),
     expiresAt: response.expiresAt,
-    linkedAs: response.linkedAs,
+    alreadyLinked: response.alreadyLinked,
   };
 }

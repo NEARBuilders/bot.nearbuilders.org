@@ -1,7 +1,7 @@
 import { Markup, Telegraf, type Context } from "telegraf";
 import { message } from "telegraf/filters";
 import { config } from "./config.js";
-import { formatDigestMessage, escapeHtml } from "./digest-message.js";
+import { formatDigestMessage } from "./digest-message.js";
 import { logEvent } from "./logger.js";
 import { digestKeyboard } from "./review-actions.js";
 import {
@@ -145,8 +145,8 @@ async function handleLink(ctx: Context, dependencies: BotDependencies): Promise<
     return;
   }
   const lines = [
-    link.linkedAs
-      ? `🔗 This Telegram account is already linked to <b>${escapeHtml(link.linkedAs)}</b>. Open the link below to move it to a different admin account.`
+    link.alreadyLinked
+      ? "🔗 This Telegram account is already linked to a nearbuilders.org admin account. Open the link below only if you want to move it to a different admin account."
       : "🔗 Open the link below while signed in to nearbuilders.org as an admin. It connects this Telegram account to yours, so your approvals from the admin group are recorded under your name.",
     "",
     "The link works once and expires in 10 minutes. Don’t share it.",
@@ -155,7 +155,7 @@ async function handleLink(ctx: Context, dependencies: BotDependencies): Promise<
     parse_mode: "HTML",
     ...Markup.inlineKeyboard([Markup.button.url("🔗 Link my account", link.url)]),
   });
-  logEvent("info", "link.sent", { userId: ctx.from.id, alreadyLinked: Boolean(link.linkedAs) });
+  logEvent("info", "link.sent", { userId: ctx.from.id, alreadyLinked: link.alreadyLinked });
 }
 
 async function handleStart(ctx: Context): Promise<void> {

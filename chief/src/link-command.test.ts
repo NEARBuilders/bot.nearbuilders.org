@@ -39,7 +39,7 @@ function setup(
         : {
             url: "https://nearbuilders.org/admin/telegram-link?code=abc",
             expiresAt: "2026-09-30T08:10:00.000Z",
-            linkedAs: null,
+            alreadyLinked: false,
           };
     },
   });
@@ -101,11 +101,11 @@ test("/link says which account it is already linked to", async () => {
     requestLink: async () => ({
       url: "https://nearbuilders.org/admin/telegram-link?code=abc",
       expiresAt: "2026-09-30T08:10:00.000Z",
-      linkedAs: "admin.near",
+      alreadyLinked: true,
     }),
   });
   await bot.handleUpdate(link(2, PRIVATE) as never);
-  assert.match(String(replies(calls)[0]!.args[1]), /already linked to <b>admin\.near<\/b>/);
+  assert.match(String(replies(calls)[0]!.args[1]), /already linked to a nearbuilders\.org admin account/);
 });
 
 test("/link refuses people outside the admin group", async () => {

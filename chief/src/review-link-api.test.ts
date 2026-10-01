@@ -23,14 +23,14 @@ test("posts the Telegram identity and returns an absolute link", async () => {
   const { fetcher, requests } = respond(200, {
     path: "/admin/telegram-link?code=abc",
     expiresAt: "2026-09-30T08:10:00.000Z",
-    linkedAs: null,
+    alreadyLinked: false,
   });
   const result = await requestTelegramLink(INPUT, { ...OPTIONS, fetch: fetcher });
 
   assert.deepEqual(result, {
     url: "https://nearbuilders.org/admin/telegram-link?code=abc",
     expiresAt: "2026-09-30T08:10:00.000Z",
-    linkedAs: null,
+    alreadyLinked: false,
   });
   assert.equal(requests[0]!.url, OPTIONS.apiUrl);
   assert.equal((requests[0]!.init.headers as Record<string, string>)["x-api-key"], "api_test");
@@ -42,7 +42,7 @@ test("rejects a link that would leave the site", async () => {
     const { fetcher } = respond(200, {
       path,
       expiresAt: "2026-09-30T08:10:00.000Z",
-      linkedAs: null,
+      alreadyLinked: false,
     });
     await assert.rejects(requestTelegramLink(INPUT, { ...OPTIONS, fetch: fetcher }), /malformed/);
   }
