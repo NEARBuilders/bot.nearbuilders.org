@@ -28,7 +28,7 @@ export const config = {
     resolveUrl("/api/reviews/telegram-decision", nearBuildersSiteUrl),
   nearTelegramLinkUrl:
     process.env.NEAR_TELEGRAM_LINK_URL ??
-    resolveUrl("/api/reviews/telegram-links", nearBuildersSiteUrl),
+    resolveUrl("/api/reviews/telegram-links/claim", nearBuildersSiteUrl),
   digestStaleAfterDays: positiveInteger(process.env.DIGEST_STALE_AFTER_DAYS, 7),
   digestHeartbeatUrl: process.env.DIGEST_HEARTBEAT_URL?.trim() ?? "",
 } as const;

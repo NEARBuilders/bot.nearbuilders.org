@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createBot } from "./bot.js";
-import type { TelegramLinkInput, TelegramLinkResult } from "./review-link-api.js";
+import { ReviewDecisionError } from "./review-decision-api.js";
+import type { TelegramLinkClaim, TelegramLinkResult } from "./review-link-api.js";
 
 const BOT_INFO = {
   id: 999,
   is_bot: true,
-  first_name: "NEAR Builders",
+  first_name: "Chief",
   username: "testbot",
   can_join_groups: true,
   can_read_all_group_messages: true,
@@ -16,6 +17,7 @@ const BOT_INFO = {
 const ADMIN_CHAT = -100777;
 const OTHER_CHAT = -100123;
 const USER = { id: 456, is_bot: false, first_name: "Saad", username: "saad" };
+const CODE = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
 
 interface Call {
   method: string;
@@ -26,21 +28,15 @@ function setup(
   options: {
     memberStatus?: string;
     adminChatId?: string;
-    requestLink?: (input: TelegramLinkInput) => Promise<TelegramLinkResult>;
+    claim?: (input: TelegramLinkClaim) => Promise<TelegramLinkResult>;
   } = {},
 ) {
-  const requests: TelegramLinkInput[] = [];
+  const claims: TelegramLinkClaim[] = [];
   const bot = createBot("test-token", {
     adminChatId: options.adminChatId ?? String(ADMIN_CHAT),
-    requestTelegramLink: async (input) => {
-      requests.push(input);
-      return options.requestLink
-        ? options.requestLink(input)
-        : {
-            url: "https://nearbuilders.org/admin/telegram-link?code=abc",
-            expiresAt: "2026-09-30T08:10:00.000Z",
-            alreadyLinked: false,
-          };
+    claimTelegramLink: async (input) => {
+      claims.push(input);
+      return options.claim ? options.claim(input) : { userLabel: "admin.near" };
     },
   });
   bot.botInfo = BOT_INFO as never;
@@ -57,10 +53,11 @@ function setup(
       },
     },
   });
-  return { bot, calls, requests };
+  return { bot, calls, claims };
 }
 
-function link(updateId: number, chat: { id: number; type: string }) {
+function message(updateId: number, chat: { id: number; type: string }, text: string) {
+  const command = text.split(" ")[0]!;
   return {
     update_id: updateId,
     message: {
@@ -68,8 +65,8 @@ function link(updateId: number, chat: { id: number; type: string }) {
       date: 1,
       chat: chat.type === "private" ? { ...chat, first_name: "Saad" } : { ...chat, title: "G" },
       from: USER,
-      text: "/link",
-      entities: [{ offset: 0, length: 5, type: "bot_command" }],
+      text,
+      entities: [{ offset: 0, length: command.length, type: "bot_command" }],
     },
   };
 }
@@ -77,71 +74,82 @@ function link(updateId: number, chat: { id: number; type: string }) {
 const PRIVATE = { id: USER.id, type: "private" };
 
 function replies(calls: Call[]) {
-  return calls.filter((call) => call.method === "sendMessage");
+  return calls.filter((call) => call.method === "sendMessage").map((call) => String(call.args[1]));
 }
 
-test("/link sends an admin group member a one-time link button", async () => {
-  const { bot, calls, requests } = setup();
-  await bot.handleUpdate(link(1, PRIVATE) as never);
+test("/link <code> links an admin group member and names the admin account", async () => {
+  const { bot, calls, claims } = setup();
+  await bot.handleUpdate(message(1, PRIVATE, `/link ${CODE}`) as never);
 
-  assert.deepEqual(requests, [{ telegramId: 456, username: "saad", name: "Saad" }]);
+  assert.deepEqual(claims, [{ code: CODE, telegramId: 456, username: "saad", name: "Saad" }]);
   assert.deepEqual(calls[0], { method: "getChatMember", args: [String(ADMIN_CHAT), 456] });
-  const [reply] = replies(calls);
-  const [chatId, text, extra] = reply!.args as [number, string, Record<string, any>];
-  assert.equal(chatId, USER.id);
-  assert.match(text, /signed in to nearbuilders\.org as an admin/);
-  assert.match(text, /10 minutes/);
-  const [[button]] = extra.reply_markup.inline_keyboard;
-  assert.equal(button.text, "🔗 Link my account");
-  assert.equal(button.url, "https://nearbuilders.org/admin/telegram-link?code=abc");
+  assert.match(replies(calls)[0]!, /✅ Linked\..*<b>admin\.near<\/b>/);
 });
 
-test("/link says which account it is already linked to", async () => {
-  const { bot, calls } = setup({
-    requestLink: async () => ({
-      url: "https://nearbuilders.org/admin/telegram-link?code=abc",
-      expiresAt: "2026-09-30T08:10:00.000Z",
-      alreadyLinked: true,
-    }),
-  });
-  await bot.handleUpdate(link(2, PRIVATE) as never);
-  assert.match(String(replies(calls)[0]!.args[1]), /already linked to a nearbuilders\.org admin account/);
+test("opening Chief from the dashboard link claims the code too", async () => {
+  const { bot, claims } = setup();
+  await bot.handleUpdate(message(2, PRIVATE, `/start link-${CODE}`) as never);
+  assert.equal(claims[0]?.code, CODE);
+});
+
+test("/link without a code explains where to get one", async () => {
+  const { bot, calls, claims } = setup();
+  await bot.handleUpdate(message(3, PRIVATE, "/link") as never);
+  assert.equal(claims.length, 0);
+  assert.match(replies(calls)[0]!, /Admin Dashboard → Telegram/);
+});
+
+test("/link rejects malformed codes without calling the website", async () => {
+  const { bot, calls, claims } = setup();
+  await bot.handleUpdate(message(4, PRIVATE, "/link nope") as never);
+  assert.equal(claims.length, 0);
+  assert.match(replies(calls)[0]!, /doesn’t look right/);
 });
 
 test("/link refuses people outside the admin group", async () => {
   for (const status of ["left", "kicked"]) {
-    const { bot, calls, requests } = setup({ memberStatus: status });
-    await bot.handleUpdate(link(3, PRIVATE) as never);
-    assert.equal(requests.length, 0);
-    assert.match(String(replies(calls)[0]!.args[1]), /Only members of the admin group/);
+    const { bot, calls, claims } = setup({ memberStatus: status });
+    await bot.handleUpdate(message(5, PRIVATE, `/link ${CODE}`) as never);
+    assert.equal(claims.length, 0);
+    assert.match(replies(calls)[0]!, /Only members of the admin group/);
   }
 });
 
 test("/link in the admin group points to a private chat and ignores other groups", async () => {
-  const { bot, calls, requests } = setup();
-  await bot.handleUpdate(link(4, { id: ADMIN_CHAT, type: "supergroup" }) as never);
-  await bot.handleUpdate(link(5, { id: OTHER_CHAT, type: "supergroup" }) as never);
+  const { bot, calls, claims } = setup();
+  await bot.handleUpdate(message(6, { id: ADMIN_CHAT, type: "supergroup" }, `/link ${CODE}`) as never);
+  await bot.handleUpdate(message(7, { id: OTHER_CHAT, type: "supergroup" }, "/link") as never);
 
-  assert.equal(requests.length, 0);
-  const sent = replies(calls);
+  assert.equal(claims.length, 0);
+  const sent = calls.filter((call) => call.method === "sendMessage");
   assert.equal(sent.length, 1);
   assert.equal(sent[0]!.args[0], ADMIN_CHAT);
   assert.match(String(sent[0]!.args[1]), /private chat/);
 });
 
-test("/link explains when the website cannot create a link", async () => {
+test("/link shows the website's reason for an expired code", async () => {
   const { bot, calls } = setup({
-    requestLink: async () => {
-      throw new Error("down");
+    claim: async () => {
+      throw new ReviewDecisionError("This code has expired or was already used.", 404);
     },
   });
-  await bot.handleUpdate(link(6, PRIVATE) as never);
-  assert.match(String(replies(calls)[0]!.args[1]), /Couldn’t create a link/);
+  await bot.handleUpdate(message(8, PRIVATE, `/link ${CODE}`) as never);
+  assert.match(replies(calls)[0]!, /expired or was already used/);
+});
+
+test("/link hides server errors behind a retry message", async () => {
+  const { bot, calls } = setup({
+    claim: async () => {
+      throw new Error("socket hang up");
+    },
+  });
+  await bot.handleUpdate(message(9, PRIVATE, `/link ${CODE}`) as never);
+  assert.match(replies(calls)[0]!, /Couldn’t reach nearbuilders\.org/);
 });
 
 test("/link reports when no admin group is configured", async () => {
-  const { bot, calls, requests } = setup({ adminChatId: "" });
-  await bot.handleUpdate(link(7, PRIVATE) as never);
-  assert.equal(requests.length, 0);
-  assert.match(String(replies(calls)[0]!.args[1]), /isn’t set up/);
+  const { bot, calls, claims } = setup({ adminChatId: "" });
+  await bot.handleUpdate(message(10, PRIVATE, `/link ${CODE}`) as never);
+  assert.equal(claims.length, 0);
+  assert.match(replies(calls)[0]!, /isn’t set up/);
 });

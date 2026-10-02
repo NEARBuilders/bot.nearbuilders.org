@@ -16,7 +16,7 @@ evaluations, reviewer links, permissions and the audit log.
 | Admin group | category buttons | Opens a list with **Approve / Reject** per item. Likely-spam items are reject-only. |
 | Admin group | **Approve** | Confirm tap; items not marked ready show a warning with Claude's reason first. |
 | Admin group | **Reject** | One of four preset reasons, or **✍️ Custom reason**: the admin replies with their own text within 10 minutes. |
-| Private chat | `/link` | For admin group members: a one-time link (10 minutes) to `/admin/telegram-link` on nearbuilders.org. Confirming it while signed in as an admin links this Telegram account to that admin account. |
+| Private chat | `/link <code>` | Links this Telegram account to the nearbuilders.org admin who created the code (admin dashboard → **Telegram** → Link my Telegram; one use, 10 minutes). Only admin group members can link. `/start link-<code>` does the same, for the dashboard's "Open Chief" button. |
 | Private chat | `/start` | Explains the bot. |
 
 Every tap is checked by the website first (a dry run): the tapper must have a linked admin account,
@@ -42,10 +42,12 @@ stops being an admin: the website cannot re-check admin status on each tap.
 3. Add the bot and promote it with only **Pin messages** and **Delete messages**. Promoting can
    upgrade the group to a supergroup with a new ID, so read the ID afterwards: send `/pending` in the
    group and look for `chatId` in the log, then set `ADMIN_CHAT_ID`.
-4. Create a dedicated **non-admin** nearbuilders.org account and an API key from it. Grant the key
-   `{"reviews":["read","write"]}` in the auth database and put it in `NEARBUILDERS_API_KEY`.
-   Admin-owned keys carry full admin rights, so never use one here.
-5. Each admin sends `/link` to the bot in a private chat and confirms on the website.
+4. Use an API key owned by a nearbuilders.org **admin** account. The website only accepts Telegram
+   decisions and link claims from admin-owned keys, because the key acts for whichever linked admin
+   tapped. Grant the key `{"reviews":["read","write"]}` in the auth database and put it in
+   `NEARBUILDERS_API_KEY`. It carries full admin rights: store it only in Railway variables.
+5. Each admin opens Admin Dashboard → **Telegram** on nearbuilders.org, taps **Link my Telegram**, and
+   sends the `/link <code>` it shows to Chief in a private chat.
 
 ```bash
 cp .env.example .env

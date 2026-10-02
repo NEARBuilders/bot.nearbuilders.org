@@ -1,63 +1,40 @@
 import { config } from "./config.js";
 import { logEvent } from "./logger.js";
-import {
-  postReviewApi,
-  ReviewDecisionError,
-  type ReviewApiOptions,
-} from "./review-decision-api.js";
+import { postReviewApi, type ReviewApiOptions } from "./review-decision-api.js";
 
-export interface TelegramLinkInput {
+export interface TelegramLinkClaim {
+  code: string;
   telegramId: number;
   username: string | null;
   name: string | null;
 }
 
 export interface TelegramLinkResult {
-  url: string;
-  expiresAt: string;
-  alreadyLinked: boolean;
+  userLabel: string;
 }
 
-interface LinkResponse {
-  path: string;
-  expiresAt: string;
-  alreadyLinked: boolean;
-}
-
-function isLinkResponse(value: unknown): value is LinkResponse {
-  if (typeof value !== "object" || value === null) return false;
-  const record = value as Record<string, unknown>;
+function isLinkResult(value: unknown): value is TelegramLinkResult {
   return (
-    typeof record.path === "string" &&
-    record.path.startsWith("/") &&
-    typeof record.expiresAt === "string" &&
-    typeof record.alreadyLinked === "boolean"
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).userLabel === "string"
   );
 }
 
-export async function requestTelegramLink(
-  input: TelegramLinkInput,
-  options: ReviewApiOptions & { siteUrl?: string } = {},
+export async function claimTelegramLink(
+  input: TelegramLinkClaim,
+  options: ReviewApiOptions = {},
 ): Promise<TelegramLinkResult> {
-  const response = await postReviewApi(
+  const result = await postReviewApi(
     {
       apiUrl: config.nearTelegramLinkUrl,
       setting: "NEAR_TELEGRAM_LINK_URL",
       event: "telegram_link",
       body: input,
-      isValid: isLinkResponse,
+      isValid: isLinkResult,
     },
     options,
   );
-  const site = new URL(options.siteUrl ?? config.nearBuildersSiteUrl);
-  const url = new URL(response.path, site);
-  if (url.origin !== site.origin) {
-    throw new ReviewDecisionError("The website returned a malformed response");
-  }
-  logEvent("info", "telegram_link.created", { alreadyLinked: response.alreadyLinked });
-  return {
-    url: url.toString(),
-    expiresAt: response.expiresAt,
-    alreadyLinked: response.alreadyLinked,
-  };
+  logEvent("info", "telegram_link.claimed");
+  return result;
 }

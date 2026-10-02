@@ -187,7 +187,7 @@ test("/start in a private chat explains the bot and points admins to /link", asy
     },
   } as never);
   assert.equal(calls.length, 1);
-  assert.match(String(calls[0]!.args[1]), /send \/link/);
+  assert.match(String(calls[0]!.args[1]), /Admin Dashboard → Telegram/);
 });
 
 test("shows /link in private chats and /pending only in the admin chat", async () => {
