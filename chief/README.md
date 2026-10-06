@@ -13,9 +13,10 @@ evaluations, reviewer links, permissions and the audit log.
 | --- | --- | --- |
 | Admin group | daily digest (cron) | Posts the queue grouped by verdict (🟢 ready, 🟡 needs a look, including items not evaluated yet, 🔴 likely spam, plus ⏰ overdue and ⚠️ failed to publish; 🕒 pending before anything is evaluated), pins it, deletes the previous one. On empty days it posts nothing (a Monday all-clear excepted) and marks the pinned digest as clear. |
 | Admin group | `/pending` | Posts the current queue now. |
-| Admin group | category buttons | Opens a list with **Approve / Reject** per item. Likely-spam items are reject-only. |
+| Admin group | category buttons | Opens a list with **Approve / Reject** per item, or **Dismiss** for items that failed to publish. Likely-spam items are reject-only. |
 | Admin group | **Approve** | Confirm tap; items not marked ready show a warning with Claude's reason first. |
 | Admin group | **Reject** | One of four preset reasons, or **✍️ Custom reason**: the admin replies with their own text within 10 minutes. |
+| Admin group | **🗂 Dismiss** | On items in ⚠️ failed to publish: after a confirm, moves the item to Rejected so it leaves the failed list. Nothing was published, the submitter is not notified, and it can be reopened from the dashboard. |
 | Private chat | `/link <code>` | Links this Telegram account to the nearbuilders.org admin who created the code (admin dashboard → **Telegram** → Link my Telegram; one use, 10 minutes). Only admin group members can link. `/start link-<code>` does the same, for the dashboard's "Open Chief" button. |
 | Private chat | `/start` | Explains the bot. |
 

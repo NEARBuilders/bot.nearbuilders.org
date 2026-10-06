@@ -12,6 +12,7 @@ import { logEvent } from "./logger.js";
 import {
   approveConfirmKeyboard,
   detailKeyboard,
+  dismissConfirmKeyboard,
   digestKeyboard,
   listCategory,
   parseReviewCallback,
@@ -160,7 +161,8 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
   };
 
   const resultLine = (result: ReviewDecisionResult, actor: string, reason?: string) => {
-    const icon = result.decision === "approved" ? "✅" : "❌";
+    const icon =
+      result.decision === "approved" ? "✅" : result.decision === "dismissed" ? "🗂" : "❌";
     const note = reason ? ` (${escapeHtml(reason)})` : "";
     return `${icon} <b>${escapeHtml(result.title)}</b> ${result.decision}${note} by ${escapeHtml(actor)}.`;
   };
@@ -222,14 +224,17 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
     if (
       action.kind === "ask_approve" ||
       action.kind === "ask_reject" ||
+      action.kind === "ask_dismiss" ||
       action.kind === "ask_custom_reason"
     ) {
+      const asked =
+        action.kind === "ask_approve" ? "approve" : action.kind === "ask_dismiss" ? "dismiss" : "reject";
       let allowed: ReviewDecisionResult;
       try {
         allowed = await decideReview({
           proposalId: action.proposalId,
           submissionCount: action.submissionCount,
-          decision: action.kind === "ask_approve" ? "approve" : "reject",
+          decision: asked,
           dryRun: true,
           actor,
         });
@@ -266,6 +271,20 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
         return;
       }
 
+      if (action.kind === "ask_dismiss") {
+        await ctx.reply(
+          `Dismiss <b>${title}</b>? Publishing failed, so nothing went live. It moves to Rejected without notifying the submitter, and can be reopened from the dashboard.`,
+          {
+            parse_mode: "HTML",
+            disable_notification: true,
+            reply_parameters: { message_id: message.message_id },
+            ...dismissConfirmKeyboard(action.proposalId, action.submissionCount),
+          },
+        );
+        logEvent("info", "review_action.confirm_requested", { userId: from.id, decision: asked });
+        return;
+      }
+
       const warning =
         action.kind === "ask_approve" && allowed.verdict !== "ready"
           ? `⚠️ <b>${title}</b> wasn’t marked ready${
@@ -288,7 +307,7 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
       );
       logEvent("info", "review_action.confirm_requested", {
         userId: from.id,
-        decision: action.kind === "ask_approve" ? "approve" : "reject",
+        decision: asked,
         warned: warning !== null,
       });
       return;
@@ -298,7 +317,12 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
       await answer(ctx, "Already working on this item…");
       return;
     }
-    const decision = action.kind === "confirm_approve" ? "approve" : "reject";
+    const decision =
+      action.kind === "confirm_approve"
+        ? "approve"
+        : action.kind === "confirm_dismiss"
+          ? "dismiss"
+          : "reject";
     decisionsInFlight.add(action.proposalId);
     let result: ReviewDecisionResult;
     try {

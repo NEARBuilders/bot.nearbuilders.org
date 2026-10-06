@@ -4,6 +4,7 @@ import {
   canActOn,
   detailKeyboard,
   digestKeyboard,
+  dismissConfirmKeyboard,
   listCategory,
   parseReviewCallback,
   rejectReasonKeyboard,
@@ -61,6 +62,7 @@ test("builds one proper button row per listed item", () => {
       submissionCount: 2,
       canApprove: true,
       canReject: true,
+      canDismiss: false,
     },
     {
       number: 2,
@@ -70,15 +72,17 @@ test("builds one proper button row per listed item", () => {
       submissionCount: 1,
       canApprove: false,
       canReject: true,
+      canDismiss: false,
     },
     {
       number: 3,
       title: "Broken Deploy",
       url: "https://nearbuilders.org/admin/dashboard/projects?item=broken",
-      proposalId: null,
-      submissionCount: null,
+      proposalId: "proposal_3",
+      submissionCount: 1,
       canApprove: false,
       canReject: false,
+      canDismiss: true,
     },
   ], "review").reply_markup.inline_keyboard as Button[][];
   assert.deepEqual(
@@ -86,7 +90,7 @@ test("builds one proper button row per listed item", () => {
     [
       ["1 · NEAR Rust SDK ↗", "✅ Approve", "❌ Reject"],
       ["2 · A builder with a very… ↗", "❌ Reject"],
-      ["3 · Broken Deploy ↗"],
+      ["3 · Broken Deploy ↗", "🗂 Dismiss"],
       ["🔄 Refresh", "✖ Close"],
     ],
   );
@@ -101,7 +105,26 @@ test("builds one proper button row per listed item", () => {
     proposalId: "proposal_2",
     submissionCount: 1,
   });
+  assert.deepEqual(parseReviewCallback(rows[2]![1]!.callback_data!), {
+    kind: "ask_dismiss",
+    proposalId: "proposal_3",
+    submissionCount: 1,
+  });
   assert.deepEqual(parseReviewCallback(rows[3]![1]!.callback_data!), { kind: "cancel" });
+});
+
+test("round-trips the dismiss confirmation", () => {
+  const rows = dismissConfirmKeyboard(PROPOSAL_ID, 2).reply_markup.inline_keyboard as Array<
+    Array<{ text: string; callback_data: string }>
+  >;
+  assert.deepEqual(
+    rows.flat().map((button) => [button.text, parseReviewCallback(button.callback_data)?.kind]),
+    [
+      ["🗂 Confirm dismiss", "confirm_dismiss"],
+      ["Cancel", "cancel"],
+    ],
+  );
+  for (const button of rows.flat()) assert.ok(button.callback_data.length <= 64);
 });
 
 test("round-trips reject reasons and cancel", () => {

@@ -53,7 +53,7 @@ interface Call {
 }
 
 type DecisionReply = {
-  decision: "approved" | "rejected" | "allowed";
+  decision: "approved" | "rejected" | "dismissed" | "allowed";
   title: string;
   verdict?: "ready" | "review" | "spam" | null;
   summary?: string | null;
@@ -66,7 +66,8 @@ function websiteDecision(input: ReviewDecisionInput): DecisionReply {
   if (input.dryRun) {
     return { decision: "allowed", title: "NEAR <Rust> SDK", verdict: "ready", summary: "Solid." };
   }
-  return { decision: input.decision === "approve" ? "approved" : "rejected", title: "NEAR <Rust> SDK" };
+  const decided = { approve: "approved", reject: "rejected", dismiss: "dismissed" } as const;
+  return { decision: decided[input.decision], title: "NEAR <Rust> SDK" };
 }
 
 function setup(
@@ -209,6 +210,35 @@ test("offers preset reasons before rejecting", async () => {
     extra.reply_markup.inline_keyboard.flat().map((button) => button.text),
     ["Incomplete", "Not NEAR-related", "Spam", "Duplicate", "✍️ Custom reason", "Cancel"],
   );
+});
+
+test("asks for confirmation before dismissing a failed item", async () => {
+  const { bot, calls, decisions } = setup();
+  await bot.handleUpdate(tap(30, `rv:d:${PROPOSAL}:1`) as never);
+  assert.deepEqual(decisions.map((entry) => [entry.decision, entry.dryRun]), [["dismiss", true]]);
+  assert.deepEqual(methods(calls), ["answerCbQuery", "sendMessage"]);
+  const [, text, extra] = calls[1]!.args as [number, string, Record<string, unknown>];
+  assert.match(text, /^Dismiss <b>NEAR &lt;Rust&gt; SDK<\/b>\? Publishing failed/);
+  const buttons = (extra.reply_markup as { inline_keyboard: Array<Array<{ callback_data: string }>> })
+    .inline_keyboard[0]!;
+  assert.deepEqual(
+    buttons.map((button) => button.callback_data),
+    [`rv:cd:${PROPOSAL}:1`, "rv:x"],
+  );
+});
+
+test("dismisses on confirm and records the result", async () => {
+  const { bot, calls, decisions } = setup();
+  await bot.handleUpdate(tap(31, `rv:cd:${PROPOSAL}:1`, { confirm: true }) as never);
+  assert.deepEqual(decisions, [
+    {
+      proposalId: PROPOSAL,
+      submissionCount: 1,
+      decision: "dismiss",
+      actor: { telegramId: REVIEWER, username: "saad" },
+    },
+  ]);
+  assert.equal(calls[1]!.args[3], "🗂 <b>NEAR &lt;Rust&gt; SDK</b> dismissed by @saad.");
 });
 
 test("does not offer actions the website says are no longer possible", async () => {
