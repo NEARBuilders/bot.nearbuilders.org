@@ -210,7 +210,7 @@ test("lists a category with one tidy block per item", () => {
   );
 });
 
-test("lets ready items be approved and failed items only be opened", () => {
+test("lets ready items be approved and failed items be dismissed", () => {
   const ready = formatCategoryDetail(QUEUE, "ready", OPTIONS);
   assert.match(
     ready.text,
@@ -224,8 +224,8 @@ test("lets ready items be approved and failed items only be opened", () => {
   const failed = formatCategoryDetail(QUEUE, "failed", OPTIONS);
   assert.match(failed.text, /<i>Approved, but publishing failed<\/i>/);
   assert.deepEqual(
-    failed.rows.map((row) => [row.canApprove, row.canReject, row.proposalId]),
-    [[false, false, null]],
+    failed.rows.map((row) => [row.canApprove, row.canReject, row.canDismiss, row.proposalId]),
+    [[false, false, true, "broken"]],
   );
 });
 

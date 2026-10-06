@@ -6,7 +6,7 @@ export type RejectionReason = "incomplete" | "not_near" | "spam" | "duplicate";
 export interface ReviewDecisionInput {
   proposalId: string;
   submissionCount: number;
-  decision: "approve" | "reject";
+  decision: "approve" | "reject" | "dismiss";
   reason?: RejectionReason;
   customReason?: string;
   dryRun?: boolean;
@@ -14,7 +14,7 @@ export interface ReviewDecisionInput {
 }
 
 export interface ReviewDecisionResult {
-  decision: "approved" | "rejected" | "allowed";
+  decision: "approved" | "rejected" | "dismissed" | "allowed";
   title: string;
   verdict?: "ready" | "review" | "spam" | null;
   summary?: string | null;
@@ -57,6 +57,7 @@ function isResult(value: unknown): value is ReviewDecisionResult {
   return (
     (record.decision === "approved" ||
       record.decision === "rejected" ||
+      record.decision === "dismissed" ||
       record.decision === "allowed") &&
     typeof record.title === "string"
   );

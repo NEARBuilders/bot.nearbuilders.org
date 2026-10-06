@@ -15,7 +15,13 @@ export interface ReviewAction {
 
 export type ReviewCallback =
   | {
-      kind: "ask_approve" | "ask_reject" | "confirm_approve" | "ask_custom_reason";
+      kind:
+        | "ask_approve"
+        | "ask_reject"
+        | "ask_dismiss"
+        | "confirm_approve"
+        | "confirm_dismiss"
+        | "ask_custom_reason";
       proposalId: string;
       submissionCount: number;
     }
@@ -87,8 +93,12 @@ export function parseReviewCallback(data: string): ReviewCallback | null {
       return { kind: "ask_approve", proposalId, submissionCount };
     case "r":
       return { kind: "ask_reject", proposalId, submissionCount };
+    case "d":
+      return { kind: "ask_dismiss", proposalId, submissionCount };
     case "ca":
       return { kind: "confirm_approve", proposalId, submissionCount };
+    case "cd":
+      return { kind: "confirm_dismiss", proposalId, submissionCount };
     case "cc":
       return { kind: "ask_custom_reason", proposalId, submissionCount };
     case "cr": {
@@ -163,6 +173,11 @@ export function detailKeyboard(rows: DetailRow[], category: DigestCategory) {
             Markup.button.callback("❌ Reject", encode(["r", row.proposalId, row.submissionCount])),
           );
         }
+        if (row.canDismiss) {
+          buttons.push(
+            Markup.button.callback("🗂 Dismiss", encode(["d", row.proposalId, row.submissionCount])),
+          );
+        }
       }
       return buttons;
     }),
@@ -177,6 +192,15 @@ export function approveConfirmKeyboard(proposalId: string, submissionCount: numb
   return Markup.inlineKeyboard([
     [
       Markup.button.callback("✅ Confirm approve", encode(["ca", proposalId, submissionCount])),
+      Markup.button.callback("Cancel", encode(["x"])),
+    ],
+  ]);
+}
+
+export function dismissConfirmKeyboard(proposalId: string, submissionCount: number) {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("🗂 Confirm dismiss", encode(["cd", proposalId, submissionCount])),
       Markup.button.callback("Cancel", encode(["x"])),
     ],
   ]);

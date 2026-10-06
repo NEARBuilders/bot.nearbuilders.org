@@ -31,6 +31,7 @@ export interface DetailRow {
   submissionCount: number | null;
   canApprove: boolean;
   canReject: boolean;
+  canDismiss: boolean;
 }
 
 export interface CategoryDetail {
@@ -122,6 +123,12 @@ function actionable(
   item: ReviewDigestItem,
 ): item is ReviewDigestItem & { submissionCount: number } {
   return item.state === "pending" && item.submissionCount !== null && canActOn(item.id);
+}
+
+function dismissable(
+  item: ReviewDigestItem,
+): item is ReviewDigestItem & { submissionCount: number } {
+  return item.state === "apply_failed" && item.submissionCount !== null && canActOn(item.id);
 }
 
 function countLine(emoji: string, count: number, label: string): string {
@@ -261,14 +268,17 @@ export function formatCategoryDetail(
     text,
     rows: shown.map((item, index) => {
       const canAct = actionable(item);
+      const canDismiss = dismissable(item);
+      const target = canAct || canDismiss;
       return {
         number: index + 1,
         title: item.title,
         url: new URL(item.dashboardPath, options.siteUrl).toString(),
-        proposalId: canAct ? item.id : null,
-        submissionCount: canAct ? item.submissionCount : null,
+        proposalId: target ? item.id : null,
+        submissionCount: target ? item.submissionCount : null,
         canApprove: canAct && item.evaluation?.verdict !== "spam",
         canReject: canAct,
+        canDismiss,
       };
     }),
   };
