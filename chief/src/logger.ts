@@ -35,11 +35,10 @@ const REDACTED_LOG_KEYS = new Set([
 ]);
 const REDACTED_LOG_PATHS = [
   ...REDACTED_LOG_KEYS,
-  ...Array.from(REDACTED_LOG_KEYS, (key) => `*.${key}`),
-  "err.message",
-  "err.stack",
-  "err.cause",
-  "err.response",
+  // Nested `message` is left out so error messages (err.message) stay readable.
+  ...Array.from(REDACTED_LOG_KEYS)
+    .filter((key) => key !== "message")
+    .map((key) => `*.${key}`),
   "err.on",
 ];
 

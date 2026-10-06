@@ -22,6 +22,7 @@ function digestPins(telegram: Telegram, chatId: string, botId: number): DigestPi
     pin: (messageId) =>
       telegram.pinChatMessage(chatId, messageId, { disable_notification: true }),
     remove: (messageId) => telegram.deleteMessage(chatId, messageId),
+    edit: (messageId, text) => telegram.editMessageText(chatId, messageId, undefined, text),
   };
 }
 
@@ -35,9 +36,6 @@ async function main(): Promise<void> {
   }
   if (!config.adminChatId) {
     throw new Error("ADMIN_CHAT_ID is not set in .env");
-  }
-  if (!config.nearBuildersSiteUrl) {
-    throw new Error("NEARBUILDERS_SITE_URL could not be resolved");
   }
 
   const telegram = new Telegram(config.telegramBotToken, {

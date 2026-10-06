@@ -39,12 +39,12 @@ interface PendingReason {
   submissionCount: number;
   title: string;
   userId: number;
-  parentMessageId: number | null;
-  parentCategory: DigestCategory | null;
+  parent: ParentMessage | null;
   expiresAt: number;
 }
 
 type KeyboardRows = Parameters<typeof withoutProposalButtons>[0];
+type ParentMessage = { message_id: number; rows: KeyboardRows | undefined };
 
 const REASON_TTL_MS = 10 * 60 * 1000;
 const MIN_REASON_CHARS = 3;
@@ -69,6 +69,7 @@ function errorMessage(error: unknown): string {
 
 export function createReviewFlow(dependencies: ReviewFlowDependencies) {
   const pendingReasons = new Map<number, PendingReason>();
+  const decisionsInFlight = new Set<string>();
   const now = () => dependencies.now?.() ?? Date.now();
 
   const isAdminChat = (ctx: Context) =>
@@ -141,7 +142,7 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
   const afterDecision = async (
     ctx: Context,
     chatId: number,
-    parent: { message_id: number; rows: KeyboardRows | undefined } | null,
+    parent: ParentMessage | null,
     proposalId: string,
   ) => {
     const digest = await loadDigest();
@@ -182,7 +183,7 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
     }
     const actor = { telegramId: from.id, username: from.username ?? null };
     const parentMessage = "reply_to_message" in message ? message.reply_to_message : undefined;
-    const parent = parentMessage
+    const parent: ParentMessage | null = parentMessage
       ? { message_id: parentMessage.message_id, rows: keyboardRows(parentMessage) }
       : null;
 
@@ -249,13 +250,15 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
             reply_markup: { force_reply: true, selective: true },
           },
         );
+        for (const [promptId, entry] of pendingReasons) {
+          if (entry.expiresAt < now()) pendingReasons.delete(promptId);
+        }
         pendingReasons.set(prompt.message_id, {
           proposalId: action.proposalId,
           submissionCount: action.submissionCount,
           title: allowed.title,
           userId: from.id,
-          parentMessageId: parent?.message_id ?? null,
-          parentCategory: listCategory(parent?.rows),
+          parent,
           expiresAt: now() + REASON_TTL_MS,
         });
         await ctx.deleteMessage().catch(() => undefined);
@@ -291,39 +294,53 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
       return;
     }
 
-    await answer(ctx, "Working…");
-    const decision = action.kind === "confirm_approve" ? "approve" : "reject";
-    try {
-      const result = await decideReview({
-        proposalId: action.proposalId,
-        submissionCount: action.submissionCount,
-        decision,
-        ...(action.kind === "confirm_reject" ? { reason: action.reason } : {}),
-        actor,
-      });
-      const reasonLabel =
-        action.kind === "confirm_reject"
-          ? REJECTION_REASONS.find((entry) => entry.reason === action.reason)?.label
-          : undefined;
-      await ctx.editMessageText(resultLine(result, actorName(from), reasonLabel), {
-        parse_mode: "HTML",
-      });
-      logEvent("info", "review_action.completed", { userId: from.id, decision });
-      await afterDecision(ctx, chatId, parent, action.proposalId);
-    } catch (error) {
-      logEvent("warn", "review_action.failed", { err: error, userId: from.id, decision });
-      await ctx
-        .editMessageText(`⚠️ Couldn’t ${decision} this item: ${escapeHtml(errorMessage(error))}`, {
-          parse_mode: "HTML",
-        })
-        .catch(() => undefined);
+    if (decisionsInFlight.has(action.proposalId)) {
+      await answer(ctx, "Already working on this item…");
+      return;
     }
+    const decision = action.kind === "confirm_approve" ? "approve" : "reject";
+    decisionsInFlight.add(action.proposalId);
+    let result: ReviewDecisionResult;
+    try {
+      await answer(ctx, "Working…");
+      try {
+        result = await decideReview({
+          proposalId: action.proposalId,
+          submissionCount: action.submissionCount,
+          decision,
+          ...(action.kind === "confirm_reject" ? { reason: action.reason } : {}),
+          actor,
+        });
+      } catch (error) {
+        logEvent("warn", "review_action.failed", { err: error, userId: from.id, decision });
+        await ctx
+          .editMessageText(`⚠️ Couldn’t ${decision} this item: ${escapeHtml(errorMessage(error))}`, {
+            parse_mode: "HTML",
+          })
+          .catch(() => undefined);
+        return;
+      }
+    } finally {
+      decisionsInFlight.delete(action.proposalId);
+    }
+    const reasonLabel =
+      action.kind === "confirm_reject"
+        ? REJECTION_REASONS.find((entry) => entry.reason === action.reason)?.label
+        : undefined;
+    await ctx
+      .editMessageText(resultLine(result, actorName(from), reasonLabel), { parse_mode: "HTML" })
+      .catch((error: unknown) => {
+        logEvent("warn", "review_action.result_edit_failed", { err: error, userId: from.id });
+      });
+    logEvent("info", "review_action.completed", { userId: from.id, decision });
+    await afterDecision(ctx, chatId, parent, action.proposalId);
   };
 
   const handleReasonReply = async (ctx: Context, next: () => Promise<void>): Promise<void> => {
     const message = ctx.message;
     const from = ctx.from;
     const chatId = ctx.chat?.id;
+    const decideReview = dependencies.decideReview;
     if (
       !message ||
       !("text" in message) ||
@@ -331,7 +348,8 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
       !message.reply_to_message ||
       !from ||
       chatId === undefined ||
-      !isAdminChat(ctx)
+      !isAdminChat(ctx) ||
+      !decideReview
     ) {
       return next();
     }
@@ -365,32 +383,15 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
       return;
     }
     pendingReasons.delete(promptId);
-    if (!dependencies.decideReview) return;
+    let result: ReviewDecisionResult;
     try {
-      const result = await dependencies.decideReview({
+      result = await decideReview({
         proposalId: pending.proposalId,
         submissionCount: pending.submissionCount,
         decision: "reject",
         customReason: reason,
         actor: { telegramId: from.id, username: from.username ?? null },
       });
-      await ctx.telegram.editMessageText(
-        chatId,
-        promptId,
-        undefined,
-        resultLine(result, actorName(from), reason),
-        { parse_mode: "HTML" },
-      );
-      logEvent("info", "review_action.completed", {
-        userId: from.id,
-        decision: "reject",
-        customReason: true,
-      });
-      const digest = await loadDigest();
-      if (digest && pending.parentMessageId !== null && pending.parentCategory) {
-        await refreshList(ctx, chatId, pending.parentMessageId, pending.parentCategory, digest);
-      }
-      if (digest) await refreshPinnedDigest(ctx, chatId, digest);
     } catch (error) {
       logEvent("warn", "review_action.failed", { err: error, userId: from.id });
       await ctx.telegram
@@ -402,7 +403,21 @@ export function createReviewFlow(dependencies: ReviewFlowDependencies) {
           { parse_mode: "HTML" },
         )
         .catch(() => undefined);
+      return;
     }
+    await ctx.telegram
+      .editMessageText(chatId, promptId, undefined, resultLine(result, actorName(from), reason), {
+        parse_mode: "HTML",
+      })
+      .catch((error: unknown) => {
+        logEvent("warn", "review_action.result_edit_failed", { err: error, userId: from.id });
+      });
+    logEvent("info", "review_action.completed", {
+      userId: from.id,
+      decision: "reject",
+      customReason: true,
+    });
+    await afterDecision(ctx, chatId, pending.parent, pending.proposalId);
   };
 
   return { handleCallback, handleReasonReply };

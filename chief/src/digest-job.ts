@@ -27,6 +27,7 @@ export interface DigestPins {
   current: () => Promise<PinnedMessage | null>;
   pin: (messageId: number) => Promise<unknown>;
   remove: (messageId: number) => Promise<unknown>;
+  edit?: (messageId: number, text: string) => Promise<unknown>;
 }
 
 export interface DigestJobDependencies {
@@ -67,6 +68,26 @@ async function replacePinnedDigest(
     });
   } catch (error) {
     logEvent("warn", "digest.pin_failed", {
+      err: error,
+      chat,
+      ...telegramErrorFields(error),
+    });
+  }
+}
+
+async function clearPinnedDigest(
+  pins: DigestPins | undefined,
+  chat: string | undefined,
+): Promise<void> {
+  if (!pins?.edit) return;
+  try {
+    const pinned = await pins.current();
+    if (!pinned?.isOwnDigest) return;
+    await pins.edit(pinned.messageId, formatAllClearMessage());
+    logEvent("info", "digest.pinned_cleared", { chat });
+  } catch (error) {
+    if (String(error).includes("message is not modified")) return;
+    logEvent("warn", "digest.pin_clear_failed", {
       err: error,
       chat,
       ...telegramErrorFields(error),
@@ -121,6 +142,7 @@ export async function runDigestJob(
   const message = formatDigestMessage(digest, { siteUrl: dependencies.siteUrl });
   if (!message) {
     if (now.getUTCDay() !== ALL_CLEAR_WEEKDAY_UTC) {
+      await clearPinnedDigest(dependencies.pins, chat);
       logEvent("info", "digest.skipped.empty", { chat });
       return "skipped_empty";
     }

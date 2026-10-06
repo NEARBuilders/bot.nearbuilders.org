@@ -11,7 +11,7 @@ evaluations, reviewer links, permissions and the audit log.
 
 | Where | Command / action | What happens |
 | --- | --- | --- |
-| Admin group | daily digest (cron) | Posts the queue grouped by verdict (🟢 ready, 🟡 needs a look, ⏳ not evaluated, 🔴 likely spam), pins it, deletes the previous one. Nothing on empty days, except a Monday all-clear. |
+| Admin group | daily digest (cron) | Posts the queue grouped by verdict (🟢 ready, 🟡 needs a look, including items not evaluated yet, 🔴 likely spam, plus ⏰ overdue and ⚠️ failed to publish; 🕒 pending before anything is evaluated), pins it, deletes the previous one. On empty days it posts nothing (a Monday all-clear excepted) and marks the pinned digest as clear. |
 | Admin group | `/pending` | Posts the current queue now. |
 | Admin group | category buttons | Opens a list with **Approve / Reject** per item. Likely-spam items are reject-only. |
 | Admin group | **Approve** | Confirm tap; items not marked ready show a warning with Claude's reason first. |

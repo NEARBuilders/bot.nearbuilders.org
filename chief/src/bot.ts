@@ -206,10 +206,17 @@ export async function setCommandMenus(bot: Telegraf, adminChatId: string): Promi
   );
   await bot.telegram.setMyCommands([], { scope: { type: "all_group_chats" } });
   if (adminChatId) {
-    await bot.telegram.setMyCommands(
-      [{ command: "pending", description: "Show the review queue now" }],
-      { scope: { type: "chat", chat_id: adminChatId } },
-    );
+    try {
+      await bot.telegram.setMyCommands(
+        [{ command: "pending", description: "Show the review queue now" }],
+        { scope: { type: "chat", chat_id: adminChatId } },
+      );
+    } catch (error) {
+      logEvent("warn", "bot.admin_command_menu_failed", {
+        err: error,
+        outcome: "check_ADMIN_CHAT_ID",
+      });
+    }
   }
   logEvent("info", "bot.command_menus_set", { adminChat: Boolean(adminChatId) });
 }

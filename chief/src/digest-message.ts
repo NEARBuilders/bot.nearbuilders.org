@@ -44,6 +44,7 @@ interface FormatOptions {
 
 const MAX_DETAIL_ITEMS = 8;
 const MAX_REASON_CHARS = 90;
+const MAX_TITLE_CHARS = 120;
 
 export const CATEGORY_LABELS: Record<DigestCategory, { emoji: string; title: string }> = {
   ready: { emoji: "🟢", title: "Ready to approve" },
@@ -215,13 +216,15 @@ function itemMeta(item: ReviewDigestItem): string {
   return parts.join(" · ");
 }
 
+function truncate(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1).trimEnd()}…` : value;
+}
+
 function itemReason(item: ReviewDigestItem): string {
   if (item.state !== "pending") return STATE_LABELS[item.state];
   const summary = item.evaluation?.summary.trim();
   if (!summary) return "Not evaluated yet";
-  return summary.length > MAX_REASON_CHARS
-    ? `${summary.slice(0, MAX_REASON_CHARS - 1).trimEnd()}…`
-    : summary;
+  return truncate(summary, MAX_REASON_CHARS);
 }
 
 export function formatCategoryDetail(
@@ -238,16 +241,24 @@ export function formatCategoryDetail(
     };
   }
 
-  const shown = items.slice(0, MAX_DETAIL_ITEMS);
-  const blocks = shown.map(
-    (item, index) =>
-      `<b>${index + 1}. ${escapeHtml(item.title)}</b>\n${escapeHtml(itemMeta(item))}\n<i>${escapeHtml(itemReason(item))}</i>`,
-  );
-  const hidden = items.length - shown.length;
-  const more = hidden > 0 ? `\n\n…and ${hidden} more in the dashboard` : "";
+  const render = (shown: ReviewDigestItem[]) => {
+    const blocks = shown.map(
+      (item, index) =>
+        `<b>${index + 1}. ${escapeHtml(truncate(item.title, MAX_TITLE_CHARS))}</b>\n${escapeHtml(itemMeta(item))}\n<i>${escapeHtml(itemReason(item))}</i>`,
+    );
+    const hidden = items.length - shown.length;
+    const more = hidden > 0 ? `\n\n…and ${hidden} more in the dashboard` : "";
+    return `${label.emoji} <b>${label.title}</b> · ${items.length}\n\n${blocks.join("\n\n")}${more}`;
+  };
+  let shown = items.slice(0, MAX_DETAIL_ITEMS);
+  let text = render(shown);
+  while (text.length > TELEGRAM_MESSAGE_LIMIT && shown.length > 1) {
+    shown = shown.slice(0, -1);
+    text = render(shown);
+  }
 
   return {
-    text: `${label.emoji} <b>${label.title}</b> · ${items.length}\n\n${blocks.join("\n\n")}${more}`,
+    text,
     rows: shown.map((item, index) => {
       const canAct = actionable(item);
       return {
