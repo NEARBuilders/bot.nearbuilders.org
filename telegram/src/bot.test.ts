@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import test from "node:test";
 import { TelegramError } from "telegraf";
 import { clearCommandMenus, createBot, type BotDependencies } from "./bot.js";
@@ -603,8 +605,9 @@ test("only expected direct-message restrictions receive the Start Chat fallback"
   const unexpectedReply = sentMessages(unexpected.calls).find(
     (call) => call.payload.chat_id === -100123,
   );
-  assert.match(String(unexpectedReply?.payload.text), /couldn’t deliver/);
-  assert.equal(unexpectedReply?.payload.reply_markup, undefined);
+  assert.match(String(unexpectedReply?.payload.text), /you've been nominated/);
+  assert.doesNotMatch(String(unexpectedReply?.payload.text), /❌|couldn/);
+  assert.ok(unexpectedReply?.payload.reply_markup);
 });
 
 test("under-review nominations preserve the v1 completed reaction behavior", async () => {
@@ -710,3 +713,56 @@ test("legacy callbacks receive the migration message", async () => {
   assert.match(String(answer?.payload.text), /flow has retired/);
   assert.equal(answer?.payload.show_alert, true);
 });
+
+for (const stall of ["before headers", "mid-body"] as const) {
+  test(`stalled Telegram calls time out without an error in the group (${stall})`, async (t) => {
+    if (stall === "mid-body") {
+      // node-fetch leaves its 500s body timer running after an abort, which
+      // would keep the test process alive.
+      const setTimer = globalThis.setTimeout;
+      t.mock.method(globalThis, "setTimeout", (...args: Parameters<typeof setTimeout>) =>
+        setTimer(...args).unref(),
+      );
+    }
+    const methods: string[] = [];
+    const server = createServer((req, res) => {
+      methods.push(String(req.url).split("/").pop() ?? "");
+      if (stall === "mid-body") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.write('{"ok":true,');
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+
+    const bot = createBot("test-token", {
+      nominations: {
+        createNomination: async () => ({
+          nominationId: "nom_pending",
+          status: "awaiting_claim",
+          created: true,
+        }),
+        claimNomination: async () => {
+          throw new Error("not used");
+        },
+      },
+      telegramCallTimeoutMs: 50,
+    });
+    bot.botInfo = BOT_INFO as never;
+    Object.assign(bot.telegram.options, {
+      apiRoot: `http://127.0.0.1:${port}`,
+      agent: undefined,
+    });
+
+    try {
+      const startedAt = Date.now();
+      await bot.handleUpdate(groupCommand(95, "/onboard @Alice") as never);
+
+      assert.ok(Date.now() - startedAt < 5_000);
+      assert.deepEqual(methods, ["sendMessage"]);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+}

@@ -1,5 +1,11 @@
 import { Agent as HttpsAgent } from "node:https";
-import { Markup, Telegraf, TelegramError, type Context } from "telegraf";
+import {
+  Context,
+  Markup,
+  Telegraf,
+  TelegramError,
+  type Telegram,
+} from "telegraf";
 import { message } from "telegraf/filters";
 import type { User } from "telegraf/types";
 import { acknowledgeCallbackQuery } from "./callback-query.js";
@@ -16,6 +22,7 @@ export interface BotDependencies {
     typeof defaultNominationApi,
     "createNomination" | "claimNomination"
   >;
+  telegramCallTimeoutMs?: number;
 }
 
 const productionDependencies: BotDependencies = {
@@ -27,6 +34,29 @@ const telegramAgent = new HttpsAgent({
   keepAlive: true,
   keepAliveMsecs: 10_000,
 });
+
+// Telegram normally answers in well under a second. Without a per-call limit a
+// stalled request holds the update until Telegraf's 90s handler timeout, and
+// polling pauses with it.
+const TELEGRAM_CALL_TIMEOUT_MS = 15_000;
+
+// Telegraf types `signal` with the abort-controller shim; node-fetch accepts
+// the native AbortSignal at runtime.
+type CallApiSignal = NonNullable<
+  NonNullable<Parameters<Telegram["callApi"]>[2]>["signal"]
+>;
+
+function withCallTimeouts(telegram: Telegram, timeoutMs: number): Telegram {
+  const callApi = telegram.callApi.bind(telegram);
+  telegram.callApi = ((method, payload, options = {}) =>
+    callApi(method, payload, {
+      ...options,
+      signal:
+        options.signal ??
+        (AbortSignal.timeout(timeoutMs) as unknown as CallApiSignal),
+    })) as Telegram["callApi"];
+  return telegram;
+}
 
 interface NominationTarget {
   id: number | null;
@@ -524,11 +554,17 @@ async function handleNominate(
       await reactCosmetically(ctx, "👀");
       return;
     }
+    // The DM may still have been delivered (e.g. a timed-out send), so offer
+    // the Start Chat recovery path instead of reporting an error in the group.
     await replyToGroupCommand(
       ctx,
-      `❌ The nomination was saved, but I couldn’t deliver ${targetMention}’s onboarding link. Please try again shortly.`,
-      { parse_mode: "HTML" },
+      buildNominationMessage(targetMention, invokerMention),
+      {
+        parse_mode: "HTML",
+        ...buildStartKeyboard(ctx, nomination.nominationId),
+      },
     );
+    await reactCosmetically(ctx, "👀");
     return;
   }
 
@@ -610,19 +646,35 @@ export function createBot(
   token: string,
   dependencies: BotDependencies = productionDependencies,
 ): Telegraf {
-  const bot = new Telegraf(token, { telegram: { agent: telegramAgent } });
+  const callTimeoutMs =
+    dependencies.telegramCallTimeoutMs ?? TELEGRAM_CALL_TIMEOUT_MS;
+  const bot = new Telegraf<Context>(token, {
+    telegram: { agent: telegramAgent },
+    contextType: class extends Context {
+      constructor(...[update, telegram, botInfo]: ConstructorParameters<
+        typeof Context
+      >) {
+        super(update, withCallTimeouts(telegram, callTimeoutMs), botInfo);
+      }
+    },
+  });
   bot.start((ctx) => handleStart(ctx, dependencies));
   bot.command("onboard", (ctx) => handleNominate(ctx, dependencies));
   bot.on(message("text"), handleDmMessage);
   bot.on("callback_query", handleCallback);
   bot.catch(async (error, ctx) => {
+    const inGroup = isGroup(ctx);
     logEvent("error", "telegram.update.failed", {
       err: error,
       updateId: ctx.update.update_id,
       chatId: ctx.chat?.id,
       userId: ctx.from?.id,
       outcome: "unhandled_error",
+      userNotified: !inGroup,
     });
+    // Unexpected failures are often transient and can follow work that already
+    // succeeded, so keep them out of group chats; the log has the details.
+    if (inGroup) return;
     try {
       await ctx.reply(
         "❌ Something went wrong while handling that request. Please try again shortly.",
